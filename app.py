@@ -15,7 +15,7 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 # 0. PAGE CONFIGURATION, INDIAN PRESETS & NSE SECTOR BENCHMARKS
 # ==============================================================================
 st.set_page_config(
-    page_title="Indian Equity Institutional Value & DCF Analyzer (NSE/BSE)",
+    page_title="Indian Equity Institutional Value, P/E-PEG & DCF Analyzer",
     page_icon="🇮🇳",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -211,7 +211,7 @@ def classify_industry_profile(sector: str, industry: str, ticker: str = "") -> D
             "applicable_note": (
                 "Banking / NBFC Detected: Deposits & borrowings are operational raw material for lenders. "
                 "EBITDA, ROCE, and Debt-to-Equity are marked N/A; analysis prioritizes ROE (>=14%), ROA (>=1.2%), "
-                "Net Profit Margin, and Price-to-Book (P/B)."
+                "P/E & P/B Historical Valuation Bands, and PEG."
             ),
         }
     return {
@@ -222,22 +222,17 @@ def classify_industry_profile(sector: str, industry: str, ticker: str = "") -> D
         "ebitda_applicable": True,
         "de_applicable": True,
         "applicable_note": (
-            "Operating Company Detected: Multi-source engine (Screener.in + Yahoo Finance) active across "
-            "ROCE, ROE, Quarterly QoQ/YoY Turnaround Scanner, EBITDA Margin, FCF, and Buyback Forensics."
+            "Operating Company Detected: Full analysis active across ROCE, ROE, Trailing vs Historical P/E Band, "
+            "PEG Ratio, Quarterly QoQ/YoY Turnaround Scanner, 2-Stage DCF, and Buyback Forensics."
         ),
     }
 
 
 # ==============================================================================
-# 2. MULTI-SOURCE INDIAN DATA FETCHER (SCREENER.IN + YFINANCE FALLBACK)
+# 2. MULTI-SOURCE INDIAN DATA FETCHER (SCREENER.IN + YFINANCE + 5Y PRICE HISTORY)
 # ==============================================================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
-    """
-    Scrapes verified Indian fundamentals from Screener.in (Consolidated first, Standalone fallback),
-    including Top Ratios, Quarterly Results (#quarters), Annual P&L (#profit-loss),
-    Balance Sheet (#balance-sheet), and Cash Flows (#cash-flow).
-    """
     base_sym = clean_symbol.split(".")[0].strip().upper()
     headers = {
         "User-Agent": (
@@ -324,7 +319,6 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
 
         if not rows_dict:
             return pd.DataFrame()
-        # Handle duplicate column names if any
         cols_clean = []
         seen_c: Dict[str, int] = {}
         for c in headers_list[1:]:
@@ -380,6 +374,13 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
     screener_data = fetch_screener_india_data(ticker_clean)
     scr_ratios = screener_data.get("ratios", {})
 
+    # Fetch 5-Year Historical Price Series for Historical P/E Calculation & Latest Price Backup
+    hist_5y = pd.DataFrame()
+    try:
+        hist_5y = ticker_obj.history(period="5y")
+    except Exception:
+        hist_5y = pd.DataFrame()
+
     current_price = (
         safe_float(info.get("currentPrice"))
         or safe_float(info.get("regularMarketPrice"))
@@ -388,21 +389,17 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
         or scr_ratios.get("current_price")
     )
 
-    if current_price is None:
-        try:
-            hist = ticker_obj.history(period="5d")
-            if hist is not None and not hist.empty:
-                current_price = safe_float(hist["Close"].iloc[-1])
-        except Exception:
-            current_price = None
+    if current_price is None and hist_5y is not None and not hist_5y.empty:
+        current_price = safe_float(hist_5y["Close"].iloc[-1])
 
     if current_price is None:
         alt_ticker = ticker_clean.replace(".NS", ".BO") if ticker_clean.endswith(".NS") else ticker_clean.replace(".BO", ".NS")
         try:
             alt_obj = yf.Ticker(alt_ticker)
-            alt_hist = alt_obj.history(period="5d")
+            alt_hist = alt_obj.history(period="5y")
             if alt_hist is not None and not alt_hist.empty:
                 current_price = safe_float(alt_hist["Close"].iloc[-1])
+                hist_5y = alt_hist
                 ticker_clean = alt_ticker
                 ticker_obj = alt_obj
                 info = alt_obj.info or {}
@@ -414,6 +411,16 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
             f"Could not retrieve live market pricing for '{ticker_clean}'. "
             "Please check the NSE/BSE symbol (e.g., TCS.NS, SUZLON.NS, CUPID.NS, HDFCBANK.NS)."
         )
+
+    # Extract Annual & 5-Year Average Close Prices by Calendar/Fiscal Year for Historical P/E Band
+    yearly_close_map: Dict[int, float] = {}
+    if hist_5y is not None and not hist_5y.empty and "Close" in hist_5y.columns:
+        try:
+            close_s = hist_5y["Close"].dropna()
+            for yr, grp in close_s.groupby(close_s.index.year):
+                yearly_close_map[int(yr)] = float(grp.median())
+        except Exception:
+            pass
 
     try:
         income_stmt = ticker_obj.financials
@@ -457,6 +464,7 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
         "fast_mcap": fast_mcap or (scr_ratios.get("market_cap_cr") * 1e7 if scr_ratios.get("market_cap_cr") else None),
         "fast_shares": fast_shares,
         "screener": screener_data,
+        "yearly_close_map": yearly_close_map,
         "sector": sector,
         "industry": industry,
         "profile": profile,
@@ -473,11 +481,6 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
 # 3. QUARTERLY RESULTS TREND & TURNAROUND SCANNER (LAST 4 QUARTERS QoQ / YoY)
 # ==============================================================================
 def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Builds a Last 4 Quarters performance table with QoQ (%) and YoY (%) growth/margin
-    deltas from Screener.in (#quarters) or Yahoo Finance quarterly_financials fallback,
-    and detects early quarterly turnarounds before annual reports are released.
-    """
     scr_qtr = bundle.get("screener", {}).get("quarters_df", pd.DataFrame())
     yf_qtr = bundle.get("quarterly_stmt", pd.DataFrame())
     profile = bundle["profile"]
@@ -490,9 +493,7 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
     eps_list: List[Optional[float]] = []
     source_used = "Screener.in Quarterly Filings (₹ Cr)"
 
-    # 1. Primary Source: Screener.in #quarters table (ordered oldest -> newest left to right)
     if scr_qtr is not None and not scr_qtr.empty and len(scr_qtr.columns) >= 4:
-        # Take up to last 5 quarters so index -1 is Latest Quarter, -2 is Prev Quarter (QoQ), -5 is YoY Quarter
         num_q = min(5, len(scr_qtr.columns))
         recent_cols = list(scr_qtr.columns[-num_q:])
         q_cols = recent_cols
@@ -518,11 +519,9 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
             net_profit_list.append(np_v)
             eps_list.append(ep_v)
 
-    # 2. Fallback Source: Yahoo Finance quarterly_financials (ordered newest -> oldest left to right)
     elif yf_qtr is not None and not yf_qtr.empty and len(yf_qtr.columns) >= 2:
         source_used = "Yahoo Finance Quarterly Filings (₹ Cr)"
         num_q = min(5, len(yf_qtr.columns))
-        # Reverse so chronological order is oldest -> newest (matching Screener convention)
         raw_cols = list(yf_qtr.columns[:num_q])[::-1]
         q_cols = [c.strftime("%b %Y") if hasattr(c, "strftime") else str(c)[:7] for c in raw_cols]
 
@@ -569,7 +568,6 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
             return None
         return ((curr - prev) / abs(prev)) * 100.0
 
-    # Compute QoQ (latest vs previous quarter) and YoY (latest vs 4 quarters ago if 5 cols exist)
     has_yoy = len(q_cols) >= 5
     qoq_sales = calc_pct_change(sales_list[-1], sales_list[-2])
     yoy_sales = calc_pct_change(sales_list[-1], sales_list[0]) if has_yoy else None
@@ -586,7 +584,6 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
     qoq_eps = calc_pct_change(eps_list[-1], eps_list[-2])
     yoy_eps = calc_pct_change(eps_list[-1], eps_list[0]) if has_yoy else None
 
-    # Display the last 4 quarters columns cleanly
     disp_cols = q_cols[-4:]
     idx_offset = len(q_cols) - len(disp_cols)
 
@@ -597,7 +594,6 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
         return f"{v:+.2f}%" if v is not None else "N/A"
 
     table_rows = []
-    # Row 1: Revenue / Sales
     r_sales: Dict[str, Any] = {"Quarterly Metric": "Revenue / Sales (₹ Cr)"}
     for i, col_name in enumerate(disp_cols):
         r_sales[col_name] = fmt_cr_cell(sales_list[idx_offset + i])
@@ -605,7 +601,6 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
     r_sales["YoY Change (%)"] = fmt_pct_cell(yoy_sales) if has_yoy else "Requires 5th Qtr"
     table_rows.append(r_sales)
 
-    # Row 2: Operating Profit / EBITDA
     op_label = "Financing Profit (₹ Cr)" if profile["is_financial"] else "Operating Profit / EBITDA (₹ Cr)"
     r_op: Dict[str, Any] = {"Quarterly Metric": op_label}
     for i, col_name in enumerate(disp_cols):
@@ -614,7 +609,6 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
     r_op["YoY Change (%)"] = fmt_pct_cell(yoy_op) if has_yoy else "—"
     table_rows.append(r_op)
 
-    # Row 3: Operating Profit Margin (OPM %)
     m_label = "Financing Margin (%)" if profile["is_financial"] else "Operating Profit Margin (OPM %)"
     r_opm: Dict[str, Any] = {"Quarterly Metric": m_label}
     for i, col_name in enumerate(disp_cols):
@@ -624,7 +618,6 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
     r_opm["YoY Change (%)"] = f"{yoy_opm_bps:+.2f}% pts" if yoy_opm_bps is not None else "—"
     table_rows.append(r_opm)
 
-    # Row 4: Net Profit (₹ Cr)
     r_np: Dict[str, Any] = {"Quarterly Metric": "Net Profit (₹ Cr)"}
     for i, col_name in enumerate(disp_cols):
         r_np[col_name] = fmt_cr_cell(net_profit_list[idx_offset + i])
@@ -632,7 +625,6 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
     r_np["YoY Change (%)"] = fmt_pct_cell(yoy_np) if has_yoy else "—"
     table_rows.append(r_np)
 
-    # Row 5: Diluted EPS (₹)
     r_eps: Dict[str, Any] = {"Quarterly Metric": "Quarterly EPS (₹)"}
     for i, col_name in enumerate(disp_cols):
         v_e = eps_list[idx_offset + i]
@@ -643,7 +635,6 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     df_qtr_display = pd.DataFrame(table_rows).set_index("Quarterly Metric")
 
-    # Turnaround & Quarterly Momentum Classification
     np_latest = net_profit_list[-1]
     np_prev = net_profit_list[-2]
     np_yoy_base = net_profit_list[0] if has_yoy else None
@@ -670,7 +661,7 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
             f"Latest quarter ({disp_cols[-1]}) swung to a positive Net Profit of ₹{np_latest:,.2f} Cr "
             f"from a prior loss, signaling an early operational inflection before full annual statements reflect it."
         )
-        score_bonus = 2.5
+        score_bonus = 2.0
     elif strong_expansion or yoy_breakout:
         t_status = "🟢 STRONG QUARTERLY EARNINGS & MARGIN MOMENTUM"
         t_color = "#16a34a"
@@ -682,7 +673,7 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
             f"In {disp_cols[-1]}, Revenue grew {s_qoq_str}{s_yoy_str} while Net Profit expanded "
             f"{np_qoq_str}{np_yoy_str}, confirming healthy near-term execution."
         )
-        score_bonus = 2.0
+        score_bonus = 1.5
     elif (qoq_np is not None and qoq_np < -12.0) or (yoy_np is not None and yoy_np < -15.0):
         t_status = "🔴 QUARTERLY EARNINGS CONTRACTION / MARGIN PRESSURE"
         t_color = "#dc2626"
@@ -718,7 +709,7 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ==============================================================================
-# 4. HYBRID METRICS ENGINE (MERGING YFINANCE + SCREENER.IN)
+# 4. HYBRID METRICS ENGINE + HISTORICAL P/E & PEG RATIO ANALYZER
 # ==============================================================================
 def compute_cagr(recent_val: Optional[float], oldest_val: Optional[float], periods: int) -> Optional[float]:
     if (
@@ -770,6 +761,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     scr_pnl = scr.get("pnl_df", pd.DataFrame())
     scr_bs = scr.get("bs_df", pd.DataFrame())
     scr_cf = scr.get("cf_df", pd.DataFrame())
+    yearly_close_map = bundle.get("yearly_close_map", {})
 
     rev_s = get_statement_row(inc, ["Total Revenue", "Operating Revenue", "Revenue", "Interest Income"])
     if rev_s is None or len(rev_s.dropna()) < 2:
@@ -888,7 +880,34 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     if pb_ratio is None and scr_ratios.get("book_value") and scr_ratios["book_value"] > 0:
         pb_ratio = bundle["current_price"] / scr_ratios["book_value"]
 
+    latest_stmt_eps = None
+    if eps_s is not None and not eps_s.dropna().empty:
+        latest_stmt_eps = safe_float(eps_s.dropna().iloc[0])
+
+    # Trailing P/E & Forward P/E Extraction
     pe_ratio = safe_float(info.get("trailingPE")) or scr_ratios.get("pe") or safe_float(info.get("forwardPE"))
+    if pe_ratio is None and latest_stmt_eps and latest_stmt_eps > 0:
+        pe_ratio = bundle["current_price"] / latest_stmt_eps
+    forward_pe = safe_float(info.get("forwardPE"))
+
+    # --- Compute 3-to-5 Year Historical Median P/E from Historical Prices & Annual EPS ---
+    hist_pe_list: List[float] = []
+    if eps_s is not None and not eps_s.dropna().empty and yearly_close_map:
+        for idx_label, eps_val in eps_s.dropna().items():
+            e_float = safe_float(eps_val)
+            if e_float is None or e_float <= 0:
+                continue
+            yr_match = re.search(r"(20\d{2})", str(idx_label))
+            if yr_match:
+                yr_int = int(yr_match.group(1))
+                if yr_int in yearly_close_map:
+                    implied_pe = yearly_close_map[yr_int] / e_float
+                    if 2.0 <= implied_pe <= 200.0:
+                        hist_pe_list.append(implied_pe)
+
+    historical_median_pe = float(np.median(hist_pe_list)) if hist_pe_list else None
+    if historical_median_pe is None and pe_ratio is not None and forward_pe is not None and forward_pe > 0:
+        historical_median_pe = float(np.mean([pe_ratio, forward_pe]))
 
     latest_ni = safe_float(ni_s.dropna().iloc[0]) if (ni_s is not None and not ni_s.dropna().empty) else safe_float(info.get("netIncomeToCommon"))
     latest_ocf = safe_float(ocf_s.dropna().iloc[0]) if (ocf_s is not None and not ocf_s.dropna().empty) else safe_float(info.get("operatingCashflow"))
@@ -989,10 +1008,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
             if latest_stmt_shares and oldest_shares and oldest_shares > 0:
                 share_change_pct = ((latest_stmt_shares - oldest_shares) / oldest_shares) * 100.0
 
-    latest_stmt_eps = None
-    if eps_s is not None and not eps_s.dropna().empty:
-        latest_stmt_eps = safe_float(eps_s.dropna().iloc[0])
-
     total_3yr_buyback_cash = 0.0
     if buyback_cf_s is not None and not buyback_cf_s.dropna().empty:
         clean_bb = buyback_cf_s.dropna()
@@ -1041,6 +1056,9 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "current_ratio": current_ratio,
         "pb_ratio": pb_ratio,
         "pe_ratio": pe_ratio,
+        "forward_pe": forward_pe,
+        "historical_median_pe": historical_median_pe,
+        "hist_pe_count": len(hist_pe_list),
         "latest_fcf": latest_fcf,
         "latest_ocf": latest_ocf,
         "latest_ni": latest_ni,
@@ -1499,7 +1517,7 @@ def fetch_industry_peer_benchmarks(
 
 
 # ==============================================================================
-# 7. 2-STAGE DCF, GRAHAM & EXPECTED YEARS TO INTRINSIC VALUE ENGINE
+# 7. P/E BAND, PEG RATIO, 2-STAGE DCF & GRAHAM VALUATION ENGINE
 # ==============================================================================
 def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
     info = bundle["info"]
@@ -1609,6 +1627,124 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
     }
 
 
+def extract_pe_peg_analysis(
+    current_price: float,
+    eps_ttm: Optional[float],
+    g1_pct: float,
+    metrics: Dict[str, Any],
+    peer_medians: Dict[str, Optional[float]],
+) -> Dict[str, Any]:
+    """
+    Evaluates:
+      1. Current Trailing P/E vs. 3-5Yr Historical Median P/E (Mean-Reversion Band)
+      2. Current Trailing P/E vs. NSE Industry Peer Median P/E
+      3. PEG Ratio = Trailing P/E / Expected Growth Rate (g1 %)
+      4. Target Fair P/E Multiple & P/E-Based Intrinsic Value = EPS_TTM * Fair_PE
+    """
+    trailing_pe = metrics.get("pe_ratio")
+    if trailing_pe is None and eps_ttm and eps_ttm > 0:
+        trailing_pe = current_price / eps_ttm
+
+    sector_pe = peer_medians.get("pe_med") or 24.0
+    hist_pe = metrics.get("historical_median_pe") or sector_pe
+
+    # PEG Ratio Calculation
+    peg_ratio = None
+    if trailing_pe is not None and trailing_pe > 0 and g1_pct > 0:
+        peg_ratio = trailing_pe / g1_pct
+
+    # Fair Target P/E Multiple: blends Historical Median P/E, Sector Median P/E, and GARP (1.25 * g1), clamped [10x, 38x]
+    garp_pe = float(np.clip(g1_pct * 1.35, 10.0, 35.0))
+    anchor_pes = [v for v in [hist_pe, sector_pe, garp_pe] if v is not None and v > 0]
+    fair_base_pe = float(np.clip(np.median(anchor_pes), 10.0, 38.0)) if anchor_pes else 20.0
+
+    pe_fair_value = (eps_ttm * fair_base_pe) if (eps_ttm is not None and eps_ttm > 0) else None
+    pe_fair_mos_pct = (
+        ((pe_fair_value - current_price) / pe_fair_value) * 100.0
+        if (pe_fair_value is not None and pe_fair_value > 0)
+        else None
+    )
+
+    # Discount / Premium vs Historical P/E and Sector P/E
+    vs_hist_pct = (
+        ((trailing_pe - hist_pe) / hist_pe) * 100.0
+        if (trailing_pe is not None and hist_pe and hist_pe > 0)
+        else None
+    )
+    vs_sector_pct = (
+        ((trailing_pe - sector_pe) / sector_pe) * 100.0
+        if (trailing_pe is not None and sector_pe and sector_pe > 0)
+        else None
+    )
+
+    # Quantitative P/E + PEG Sub-Score (0 to 10.0 pts)
+    # Part A: PEG Score (0 to 5.0 pts)
+    if peg_ratio is None:
+        peg_pts = 2.0
+        peg_status = "⚪ PEG N/A"
+    elif peg_ratio <= 1.0:
+        peg_pts = 5.0
+        peg_status = "🟢 Undervalued Growth (PEG <= 1.0x)"
+    elif peg_ratio <= 1.5:
+        peg_pts = 3.75
+        peg_status = "🟢 Fair GARP Multiple (1.0x - 1.5x)"
+    elif peg_ratio <= 2.2:
+        peg_pts = 2.0
+        peg_status = "🟡 Fully Priced for Growth (1.5x - 2.2x)"
+    else:
+        peg_pts = 0.0
+        peg_status = "🔴 Expensive / Stretched PEG (> 2.2x)"
+
+    # Part B: Relative P/E Multiple vs History & Sector (0 to 5.0 pts)
+    rel_pe_pts = 0.0
+    if trailing_pe is not None and trailing_pe > 0:
+        if hist_pe and trailing_pe <= hist_pe * 0.90:
+            rel_pe_pts += 2.5
+        elif hist_pe and trailing_pe <= hist_pe * 1.08:
+            rel_pe_pts += 1.5
+        elif hist_pe and trailing_pe <= hist_pe * 1.25:
+            rel_pe_pts += 0.5
+
+        if sector_pe and trailing_pe <= sector_pe * 0.90:
+            rel_pe_pts += 2.5
+        elif sector_pe and trailing_pe <= sector_pe * 1.08:
+            rel_pe_pts += 1.5
+        elif sector_pe and trailing_pe <= sector_pe * 1.25:
+            rel_pe_pts += 0.5
+    else:
+        rel_pe_pts = 1.5
+
+    total_pe_peg_pts = float(np.clip(peg_pts + rel_pe_pts, 0.0, 10.0))
+
+    if total_pe_peg_pts >= 7.5:
+        overall_pe_verdict = "🟢 ATTRACTIVE MULTIPLE (Below Historical/Sector Band & Reasonable PEG)"
+        pe_badge_color = "#16a34a"
+    elif total_pe_peg_pts >= 4.5:
+        overall_pe_verdict = "⚖️ FAIR VALUATION MULTIPLE (In Line with Historical/Sector Norms)"
+        pe_badge_color = "#2563eb"
+    else:
+        overall_pe_verdict = "🔴 STRETCHED P/E & PEG MULTIPLE (Trading at a Heavy Valuation Premium)"
+        pe_badge_color = "#dc2626"
+
+    return {
+        "trailing_pe": trailing_pe,
+        "hist_pe": hist_pe,
+        "sector_pe": sector_pe,
+        "peg_ratio": peg_ratio,
+        "peg_status": peg_status,
+        "fair_base_pe": fair_base_pe,
+        "pe_fair_value": pe_fair_value,
+        "pe_fair_mos_pct": pe_fair_mos_pct,
+        "vs_hist_pct": vs_hist_pct,
+        "vs_sector_pct": vs_sector_pct,
+        "peg_pts": peg_pts,
+        "rel_pe_pts": rel_pe_pts,
+        "total_pe_peg_pts": total_pe_peg_pts,
+        "overall_pe_verdict": overall_pe_verdict,
+        "pe_badge_color": pe_badge_color,
+    }
+
+
 def estimate_years_to_target(
     current_price: float,
     target_iv: Optional[float],
@@ -1642,7 +1778,7 @@ def estimate_years_to_target(
         )
 
 
-def compute_single_dcf_and_graham(
+def compute_single_dcf_graham_and_pe(
     fcf_0: Optional[float],
     shares: Optional[float],
     total_cash: float,
@@ -1651,6 +1787,7 @@ def compute_single_dcf_and_graham(
     g1_pct: float,
     discount_pct: float,
     terminal_g_pct: float,
+    fair_pe_mult: float,
     current_price: float,
 ) -> Dict[str, Any]:
     safe_term_g_pct = min(terminal_g_pct, discount_pct - 1.5)
@@ -1684,7 +1821,13 @@ def compute_single_dcf_and_graham(
         if graham_per_share > 0:
             graham_mos_pct = ((graham_per_share - current_price) / graham_per_share) * 100.0
 
-    valid_vals = [v for v in [dcf_per_share, graham_per_share] if v is not None and v > 0]
+    pe_target_per_share, pe_target_mos_pct = None, None
+    if eps_ttm is not None and eps_ttm > 0 and fair_pe_mult > 0:
+        pe_target_per_share = eps_ttm * fair_pe_mult
+        if pe_target_per_share > 0:
+            pe_target_mos_pct = ((pe_target_per_share - current_price) / pe_target_per_share) * 100.0
+
+    valid_vals = [v for v in [dcf_per_share, graham_per_share, pe_target_per_share] if v is not None and v > 0]
     blended_iv = float(np.mean(valid_vals)) if valid_vals else None
     blended_mos_pct = (
         ((blended_iv - current_price) / blended_iv) * 100.0
@@ -1703,12 +1846,15 @@ def compute_single_dcf_and_graham(
         "g1_pct": g1_pct,
         "discount_pct": discount_pct,
         "terminal_g_pct": safe_term_g_pct,
+        "fair_pe_mult": fair_pe_mult,
         "pv_stage1": pv_stage1,
         "pv_terminal": pv_terminal,
         "dcf_intrinsic": dcf_per_share,
         "dcf_mos_pct": dcf_mos_pct,
         "graham_intrinsic": graham_per_share,
         "graham_mos_pct": graham_mos_pct,
+        "pe_intrinsic": pe_target_per_share,
+        "pe_mos_pct": pe_target_mos_pct,
         "blended_intrinsic": blended_iv,
         "blended_mos_pct": blended_mos_pct,
         "est_years": est_years,
@@ -1721,34 +1867,37 @@ def build_three_scenarios(
     base_g1_pct: float,
     base_discount_pct: float,
     base_terminal_g_pct: float,
+    fair_base_pe: float,
     current_price: float,
 ) -> Dict[str, Dict[str, Any]]:
     cons_g1 = max(2.0, base_g1_pct * 0.70)
     cons_r = min(18.0, base_discount_pct + 1.5)
     cons_term = max(2.0, base_terminal_g_pct - 0.5)
+    cons_pe = max(8.0, fair_base_pe * 0.80)
 
     opt_g1 = min(25.0, base_g1_pct * 1.25)
     opt_r = max(8.0, base_discount_pct - 1.0)
     opt_term = min(opt_r - 2.0, base_terminal_g_pct + 0.5)
+    opt_pe = min(45.0, fair_base_pe * 1.20)
 
     return {
-        "Conservative": compute_single_dcf_and_graham(
+        "Conservative": compute_single_dcf_graham_and_pe(
             dcf_inputs["fcf_0"], dcf_inputs["shares"], dcf_inputs["total_cash"],
-            dcf_inputs["total_debt"], dcf_inputs["eps_ttm"], cons_g1, cons_r, cons_term, current_price
+            dcf_inputs["total_debt"], dcf_inputs["eps_ttm"], cons_g1, cons_r, cons_term, cons_pe, current_price
         ),
-        "Base Case": compute_single_dcf_and_graham(
+        "Base Case": compute_single_dcf_graham_and_pe(
             dcf_inputs["fcf_0"], dcf_inputs["shares"], dcf_inputs["total_cash"],
-            dcf_inputs["total_debt"], dcf_inputs["eps_ttm"], base_g1_pct, base_discount_pct, base_terminal_g_pct, current_price
+            dcf_inputs["total_debt"], dcf_inputs["eps_ttm"], base_g1_pct, base_discount_pct, base_terminal_g_pct, fair_base_pe, current_price
         ),
-        "Optimistic": compute_single_dcf_and_graham(
+        "Optimistic": compute_single_dcf_graham_and_pe(
             dcf_inputs["fcf_0"], dcf_inputs["shares"], dcf_inputs["total_cash"],
-            dcf_inputs["total_debt"], dcf_inputs["eps_ttm"], opt_g1, opt_r, opt_term, current_price
+            dcf_inputs["total_debt"], dcf_inputs["eps_ttm"], opt_g1, opt_r, opt_term, opt_pe, current_price
         ),
     }
 
 
 # ==============================================================================
-# 8. CORPORATE NEWS SENTIMENT & SEPARATED POSITIVES / RISKS DECISION ENGINE
+# 8. CORPORATE NEWS SENTIMENT & DECISION ENGINE (WITH P/E & PEG SCORING)
 # ==============================================================================
 NOISE_PATTERNS = [
     r"\bmidday movers\b", r"\bstock market today\b", r"\btop gainers\b",
@@ -1830,12 +1979,22 @@ def compute_decision_verdict(
     profile: Dict[str, Any],
     metrics: Dict[str, Any],
     qtr_analysis: Dict[str, Any],
+    pe_peg_analysis: Dict[str, Any],
     peer_medians: Dict[str, Optional[float]],
     scenarios: Dict[str, Dict[str, Any]],
     news_summary: Dict[str, Any],
     checklist_result: Dict[str, Any],
     user_confirmed_count: int,
 ) -> Dict[str, Any]:
+    """
+    Upgraded 70-Point Fundamental Scoring Architecture:
+      1. Blended Margin of Safety (DCF + Graham + Fair P/E Target): 0 - 20 pts
+      2. P/E Multiple vs. History/Sector & PEG Ratio Discipline:    0 - 10 pts
+      3. Capital Efficiency (ROE & ROCE / ROA):                    0 - 18 pts
+      4. Annual + Quarterly Growth, Margin & Buyback Quality:      0 - 12 pts
+      5. Sector Checklist Pass Rate & Peer Outperformance:         0 - 10 pts
+    Plus 30-Point Corporate News Sentiment = 100 Points Total.
+    """
     base_case = scenarios["Base Case"]
     cons_case = scenarios["Conservative"]
     opt_case = scenarios["Optimistic"]
@@ -1843,6 +2002,7 @@ def compute_decision_verdict(
     mos = base_case.get("blended_mos_pct")
     dcf_iv = base_case.get("dcf_intrinsic")
     graham_iv = base_case.get("graham_intrinsic")
+    pe_iv = base_case.get("pe_intrinsic")
     blended_iv = base_case.get("blended_intrinsic")
 
     roe = metrics.get("roe_pct")
@@ -1850,32 +2010,35 @@ def compute_decision_verdict(
     roa = metrics.get("roa_pct")
     de = metrics.get("de_ratio")
 
-    # 1. Margin of Safety Sub-Score (0 - 25 pts)
+    # 1. Blended Margin of Safety Sub-Score (0 - 20 pts)
     if mos is None:
-        mos_pts = 5.0
+        mos_pts = 4.0
     elif mos >= 30.0:
-        mos_pts = 25.0
+        mos_pts = 20.0
     elif mos >= 0.0:
-        mos_pts = 12.5 + (mos / 30.0) * 12.5
+        mos_pts = 10.0 + (mos / 30.0) * 10.0
     elif mos >= -30.0:
-        mos_pts = max(0.0, 12.5 + (mos / 30.0) * 12.5)
+        mos_pts = max(0.0, 10.0 + (mos / 30.0) * 10.0)
     else:
         mos_pts = 0.0
 
-    # 2. ROE & ROCE / ROA Capital Efficiency Sub-Score (0 - 20 pts)
-    roe_pts = min(10.0, max(0.0, ((roe or 0.0) / 20.0) * 10.0)) if roe is not None else 5.0
+    # 2. P/E & PEG Valuation Multiple Sub-Score (0 - 10 pts)
+    pe_peg_pts = pe_peg_analysis["total_pe_peg_pts"]
+
+    # 3. ROE & ROCE / ROA Capital Efficiency Sub-Score (0 - 18 pts)
+    roe_pts = min(9.0, max(0.0, ((roe or 0.0) / 20.0) * 9.0)) if roe is not None else 4.5
     if profile["roce_applicable"]:
-        roce_pts = min(10.0, max(0.0, ((roce or 0.0) / 20.0) * 10.0)) if roce is not None else 5.0
+        roce_pts = min(9.0, max(0.0, ((roce or 0.0) / 20.0) * 9.0)) if roce is not None else 4.5
     else:
-        roce_pts = min(10.0, max(0.0, ((roa or 0.0) / 1.5) * 10.0)) if roa is not None else 5.0
+        roce_pts = min(9.0, max(0.0, ((roa or 0.0) / 1.5) * 9.0)) if roa is not None else 4.5
     efficiency_pts = roe_pts + roce_pts
 
-    # 3. Growth Acceleration, Quarterly Turnaround, Margin Expansion & Buyback Quality (0 - 15 pts)
+    # 4. Growth Acceleration, Quarterly Turnaround, Margin Expansion & Buyback Quality (0 - 12 pts)
     rev_yoy = metrics["rev_growth"]["recent_yoy_pct"]
     rev_cagr = metrics["rev_growth"]["past_cagr_pct"]
-    growth_pts = 3.5
+    growth_pts = 2.5
     if rev_yoy is not None and rev_yoy > 8.0:
-        growth_pts += 2.0
+        growth_pts += 1.5
     if rev_yoy is not None and rev_cagr is not None and rev_yoy >= rev_cagr:
         growth_pts += 1.5
 
@@ -1889,12 +2052,11 @@ def compute_decision_verdict(
     elif metrics["buyback_verdict"] == "BUYBACK-BOOSTED EPS":
         growth_pts += 0.8
 
-    # Include Quarterly Turnaround / Momentum bonus (-1.5 to +2.5 pts)
     growth_pts += float(qtr_analysis.get("score_bonus", 0.0))
-    growth_pts += min(2.5, user_confirmed_count * (2.5 / 3.0))
-    growth_pts = float(np.clip(growth_pts, 0.0, 15.0))
+    growth_pts += min(2.0, user_confirmed_count * (2.0 / 3.0))
+    growth_pts = float(np.clip(growth_pts, 0.0, 12.0))
 
-    # 4. Sector Checklist Pass Rate & Industry Peer Comparison (0 - 10 pts)
+    # 5. Sector Checklist Pass Rate & Industry Peer Comparison (0 - 10 pts)
     quant_pass_ratio = checklist_result["pass_count"] / max(1, checklist_result["total_checks"])
     bs_peer_pts = quant_pass_ratio * 6.0
 
@@ -1910,18 +2072,26 @@ def compute_decision_verdict(
         bs_peer_pts += 0.5
     bs_peer_pts = min(10.0, bs_peer_pts)
 
-    fundamental_score_70 = float(np.clip(mos_pts + efficiency_pts + growth_pts + bs_peer_pts, 0.0, 70.0))
+    fundamental_score_70 = float(
+        np.clip(mos_pts + pe_peg_pts + efficiency_pts + growth_pts + bs_peer_pts, 0.0, 70.0)
+    )
 
-    # 5. Sentiment Sub-Score (0 - 30 pts)
+    # 6. Sentiment Sub-Score (0 - 30 pts)
     avg_comp = news_summary.get("avg_compound", 0.0)
     clamped_comp = float(np.clip(avg_comp, -0.5, 0.5))
     sentiment_score_30 = ((clamped_comp + 0.5) / 1.0) * 30.0
 
     total_score = float(np.clip(fundamental_score_70 + sentiment_score_30, 0.0, 100.0))
 
-    if total_score >= 75.0 and (mos is not None and mos >= 15.0) and checklist_result["pass_count"] >= 3:
+    # Guardrail: If P/E & PEG are severely overvalued (PEG > 3.0 and negative MoS), cap verdict
+    peg_val = pe_peg_analysis.get("peg_ratio")
+    severely_expensive_multiple = (peg_val is not None and peg_val > 3.0) and (mos is not None and mos < -15.0)
+
+    if severely_expensive_multiple:
+        verdict, badge_color = "OVERVALUED / MULTIPLE TRAP", "#dc2626"
+    elif total_score >= 75.0 and (mos is not None and mos >= 15.0) and checklist_result["pass_count"] >= 3:
         verdict, badge_color = "STRONG BUY", "#16a34a"
-    elif total_score >= 60.0 and (mos is not None and mos >= 0.0):
+    elif total_score >= 60.0 and (mos is not None and mos >= -2.0):
         verdict, badge_color = "ACCUMULATE", "#2563eb"
     elif total_score >= 45.0:
         verdict, badge_color = "HOLD / WATCHLIST", "#d97706"
@@ -1930,6 +2100,30 @@ def compute_decision_verdict(
 
     positive_points: List[str] = []
     risk_points: List[str] = []
+
+    # P/E & PEG Valuation Bullet Points
+    t_pe = pe_peg_analysis.get("trailing_pe")
+    h_pe = pe_peg_analysis.get("hist_pe")
+    s_pe = pe_peg_analysis.get("sector_pe")
+    if t_pe is not None:
+        if h_pe and t_pe < h_pe * 0.92:
+            positive_points.append(
+                f"**P/E Multiple Discount vs. History ({t_pe:.1f}x vs {h_pe:.1f}x 5Y Median):** Stock is trading at a {abs(pe_peg_analysis['vs_hist_pct'] or 0):.1f}% discount to its historical P/E band (Sector P/E: {s_pe:.1f}x)."
+            )
+        elif h_pe and t_pe > h_pe * 1.20:
+            risk_points.append(
+                f"**Historical P/E Multiple Premium ({t_pe:.1f}x vs {h_pe:.1f}x 5Y Median):** Stock trades {pe_peg_analysis['vs_hist_pct']:+.1f}% above its historical median P/E (Sector P/E: {s_pe:.1f}x), creating de-rating risk."
+            )
+
+    if peg_val is not None:
+        if peg_val <= 1.35:
+            positive_points.append(
+                f"**Attractive Growth-Adjusted Valuation (PEG: {peg_val:.2f}x):** Trailing P/E ({t_pe:.1f}x) is well-supported by its expected annual growth rate ({base_case['g1_pct']:.1f}%)."
+            )
+        elif peg_val > 2.0:
+            risk_points.append(
+                f"**Stretched PEG Ratio ({peg_val:.2f}x):** Current P/E multiple ({t_pe:.1f}x) is high relative to its projected growth rate ({base_case['g1_pct']:.1f}%/yr)."
+            )
 
     # Quarterly Turnaround Bullet
     if qtr_analysis.get("available"):
@@ -1969,48 +2163,30 @@ def compute_decision_verdict(
                 f"**Elevated Balance Sheet Leverage (D/E: {de:.2f}x):** High debt obligations increase vulnerability during industry slowdowns."
             )
 
-    if rev_yoy is not None and rev_cagr is not None:
-        if rev_yoy >= rev_cagr:
-            positive_points.append(
-                f"**Accelerating Annual Top-Line Momentum:** Recent annual revenue growth ({rev_yoy:+.1f}%) is outpacing its 3-year CAGR ({rev_cagr:+.1f}%)."
-            )
-        else:
-            risk_points.append(
-                f"**Annual Top-Line Deceleration:** Recent annual revenue growth ({rev_yoy:+.1f}%) has slowed below its 3-year CAGR ({rev_cagr:+.1f}%)."
-            )
-
     if mos is not None and mos >= 15.0:
         positive_points.append(
-            f"**Attractive Margin of Safety ({mos:+.1f}%):** Market price ({format_inr_price(current_price)}) trades at a meaningful discount to Blended Intrinsic Value ({format_inr_price(blended_iv)})."
+            f"**Attractive 3-Model Margin of Safety ({mos:+.1f}%):** Market price ({format_inr_price(current_price)}) trades below Blended Intrinsic Value ({format_inr_price(blended_iv)}, combining DCF, Graham, and {base_case['fair_pe_mult']:.1f}x Fair P/E)."
         )
     elif mos is not None and mos < 0:
         risk_points.append(
-            f"**Valuation Premium Risk ({mos:+.1f}% MoS):** Current price ({format_inr_price(current_price)}) trades above Base-Case Blended Intrinsic Value ({format_inr_price(blended_iv)}), leaving little room for earnings misses."
+            f"**Valuation Premium Risk ({mos:+.1f}% MoS):** Current price ({format_inr_price(current_price)}) trades above Base-Case 3-Model Intrinsic Value ({format_inr_price(blended_iv)})."
         )
 
     if dcf_iv is not None and graham_iv is not None and graham_iv > dcf_iv * 1.6:
         risk_points.append(
-            f"**DCF vs. Graham Cash-Conversion Gap:** Graham Value ({format_inr_price(graham_iv)}) is much higher than 2-Stage DCF ({format_inr_price(dcf_iv)}), indicating heavy CapEx or working capital is absorbing Free Cash Flow."
+            f"**DCF vs. Graham/P/E Cash-Conversion Gap:** Earnings-based valuations (Graham: {format_inr_price(graham_iv)}, Fair P/E: {format_inr_price(pe_iv)}) exceed 2-Stage DCF ({format_inr_price(dcf_iv)}), showing CapEx/working capital is absorbing Free Cash Flow."
         )
 
     if metrics["buyback_verdict"] == "100% ORGANIC EPS GROWTH":
         positive_points.append(
-            "**High-Quality Organic EPS:** Per-share earnings growth is backed by genuine Net Profit expansion rather than financial engineering."
+            "**High-Quality Organic EPS:** Per-share earnings growth is backed by genuine Net Profit expansion."
         )
     else:
         risk_points.append(f"**Share Count Distortion ({metrics['buyback_verdict']}):** {metrics['buyback_explanation']}")
 
-    if checklist_result["pass_count"] >= 3:
-        positive_points.append(
-            f"**Sector Checklist Conviction:** Passed {checklist_result['pass_count']} out of {checklist_result['total_checks']} mandatory quantitative rules for its industry."
-        )
-    else:
-        risk_points.append(
-            f"**Sector Checklist Weaknesses:** Passed only {checklist_result['pass_count']} of {checklist_result['total_checks']} mandatory quantitative sector rules."
-        )
-
     return {
         "fundamental_score_70": fundamental_score_70,
+        "pe_peg_pts": pe_peg_pts,
         "sentiment_score_30": sentiment_score_30,
         "total_score": total_score,
         "verdict": verdict,
@@ -2100,13 +2276,13 @@ def main() -> None:
 
     target_ticker = st.session_state["active_ticker"]
 
-    st.title("🇮🇳 Indian Market Institutional Value, Quarterly Turnaround & DCF Analyzer")
+    st.title("🇮🇳 Indian Market Institutional Value, P/E-PEG, Quarterly & DCF Analyzer")
     st.markdown(
         "**Multi-Source Engine (`Screener.in` + `Yahoo Finance` + `NSE Sector Medians`)** • "
-        "**Last 4 Quarters QoQ/YoY Turnaround Scanner** • **3-Scenario 2-Stage DCF**"
+        "**Historical P/E Band & PEG Ratio** • **Quarterly Turnaround Scanner** • **3-Model DCF/Graham/PE Valuation**"
     )
 
-    with st.spinner(f"Fetching annual, quarterly, and peer financials for {target_ticker}..."):
+    with st.spinner(f"Fetching annual, quarterly, 5-year P/E bands, and peer financials for {target_ticker}..."):
         try:
             bundle = fetch_company_bundle(target_ticker)
             metrics = extract_comprehensive_metrics(bundle)
@@ -2116,6 +2292,18 @@ def main() -> None:
                 target_ticker=target_ticker,
                 archetype=bundle["profile"]["archetype"],
                 custom_peers_str=custom_peers_input,
+            )
+            dcf_inputs = extract_dcf_inputs(bundle, metrics)
+            applied_g1 = custom_g1 if use_custom_params else dcf_inputs["base_g1_pct"]
+            applied_r = custom_discount if use_custom_params else dcf_inputs["base_discount_pct"]
+            applied_term_g = custom_term_g if use_custom_params else dcf_inputs["base_terminal_g_pct"]
+
+            pe_peg_analysis = extract_pe_peg_analysis(
+                current_price=bundle["current_price"],
+                eps_ttm=dcf_inputs["eps_ttm"],
+                g1_pct=applied_g1,
+                metrics=metrics,
+                peer_medians=peer_medians,
             )
         except ValueError as ve:
             st.error(f"**Ticker Lookup Error:** {ve}")
@@ -2155,11 +2343,11 @@ def main() -> None:
     # --------------------------------------------------------------------------
     st.header("1. Business Health, Capital Efficiency (ROE & ROCE) & Quarterly Turnaround Scanner")
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
     with k1:
         roe_v = metrics["roe_pct"]
         roe_med_v = peer_medians.get("roe_med")
-        roe_delta = f"vs {roe_med_v:.1f}% Sector Med" if (roe_v is not None and roe_med_v is not None) else "Target >= 15%"
+        roe_delta = f"vs {roe_med_v:.1f}% Sector" if (roe_v is not None and roe_med_v is not None) else "Target >= 15%"
         st.metric(
             label="Return on Equity (ROE)",
             value=f"{roe_v:.2f}%" if roe_v is not None else "N/A",
@@ -2170,7 +2358,7 @@ def main() -> None:
         roce_v = metrics["roce_pct"]
         roce_med_v = peer_medians.get("roce_med")
         if profile["roce_applicable"]:
-            roce_delta = f"vs {roce_med_v:.1f}% Sector Med" if (roce_v is not None and roce_med_v is not None) else "Target >= 15%"
+            roce_delta = f"vs {roce_med_v:.1f}% Sector" if (roce_v is not None and roce_med_v is not None) else "Target >= 15%"
             st.metric(
                 label="Return on Capital (ROCE)",
                 value=f"{roce_v:.2f}%" if roce_v is not None else "N/A",
@@ -2178,7 +2366,7 @@ def main() -> None:
                 delta_color="normal" if (roce_v is not None and roce_v >= (roce_med_v or 15.0)) else "inverse",
             )
         else:
-            st.metric(label="ROCE (EBIT / Cap Emp)", value="N/A (Bank/NBFC)", delta="See ROA & ROE", delta_color="off")
+            st.metric(label="ROCE (EBIT / Cap Emp)", value="N/A (Bank)", delta="See ROA & ROE", delta_color="off")
     with k3:
         roa_v = metrics["roa_pct"]
         roa_target = 1.2 if profile["is_financial"] else 7.0
@@ -2194,7 +2382,7 @@ def main() -> None:
             st.metric(
                 label="Debt-to-Equity (D/E)",
                 value=f"{de_v:.2f}x" if de_v is not None else "0.00x",
-                delta="Conservative <= 0.8x" if (de_v is None or de_v <= 0.8) else "Elevated Leverage",
+                delta="Safe <= 0.8x" if (de_v is None or de_v <= 0.8) else "High Leverage",
                 delta_color="normal" if (de_v is None or de_v <= 0.8) else "inverse",
             )
         else:
@@ -2202,21 +2390,28 @@ def main() -> None:
             st.metric(
                 label="Price-to-Book (P/B)",
                 value=f"{pb_v:.2f}x" if pb_v is not None else "N/A",
-                delta="Bank Valuation Multiple",
+                delta="Bank Multiple",
                 delta_color="off",
             )
     with k5:
-        pe_v = metrics["pe_ratio"]
-        pe_med_v = peer_medians.get("pe_med")
-        pe_delta = f"Sector P/E: {pe_med_v:.1f}x" if pe_med_v is not None else None
+        pe_v = pe_peg_analysis["trailing_pe"]
+        h_pe_v = pe_peg_analysis["hist_pe"]
+        pe_delta = f"5Y Hist Med: {h_pe_v:.1f}x" if h_pe_v is not None else None
         st.metric(
             label="Trailing P/E Multiple",
             value=f"{pe_v:.2f}x" if pe_v is not None else "N/A",
             delta=pe_delta,
-            delta_color="normal" if (pe_v is not None and pe_med_v is not None and pe_v <= pe_med_v) else "off",
+            delta_color="normal" if (pe_v is not None and h_pe_v is not None and pe_v <= h_pe_v) else "inverse",
+        )
+    with k6:
+        peg_v = pe_peg_analysis["peg_ratio"]
+        st.metric(
+            label="PEG Ratio (P/E ÷ g₁)",
+            value=f"{peg_v:.2f}x" if peg_v is not None else "N/A",
+            delta="Target <= 1.5x" if (peg_v is not None and peg_v <= 1.5) else "Stretched > 1.5x" if peg_v is not None else None,
+            delta_color="normal" if (peg_v is not None and peg_v <= 1.5) else "inverse",
         )
 
-    # --- NEW: LAST 4 QUARTERS RESULTS TREND TABLE (QoQ & YoY) ---
     st.markdown("#### ⚡ Last 4 Quarters Results Trend & Early Turnaround Scanner (QoQ & YoY)")
     if qtr_analysis["available"]:
         q_color = qtr_analysis["turnaround_badge_color"]
@@ -2259,7 +2454,7 @@ def main() -> None:
     with chk_col2:
         st.markdown("#### ☑️ Qualitative Moat Reconfirmation")
         st.caption(
-            "Tick each sector-specific check below after verifying to add up to +2.5 conviction points:"
+            "Tick each sector-specific check below after verifying to add up to +2.0 conviction points:"
         )
         user_confirmed_count = 0
         for idx, q_text in enumerate(checklist_result["qual_questions"]):
@@ -2283,9 +2478,9 @@ def main() -> None:
     st.divider()
 
     # --------------------------------------------------------------------------
-    # SECTION 3: CURRENT VS. PAST GROWTH, MARGINS, BUYBACK CHECK & INDUSTRY PEERS
+    # SECTION 3: CURRENT VS. PAST GROWTH, MARGINS, P/E BAND, PEG & INDUSTRY PEERS
     # --------------------------------------------------------------------------
-    st.header("3. Growth Acceleration, EBITDA/Profit Margins, Buyback Forensics & Industry Comparison")
+    st.header("3. Growth Acceleration, EBITDA/Profit Margins, P/E-PEG & Industry Comparison")
 
     bb_verdict = metrics["buyback_verdict"]
     bb_color = "#16a34a" if bb_verdict == "100% ORGANIC EPS GROWTH" else ("#d97706" if bb_verdict == "BUYBACK-BOOSTED EPS" else "#dc2626")
@@ -2326,12 +2521,44 @@ def main() -> None:
     else:
         nm_momentum = "N/A"
 
+    t_pe_v = pe_peg_analysis["trailing_pe"]
+    h_pe_v = pe_peg_analysis["hist_pe"]
+    s_pe_v = pe_peg_analysis["sector_pe"]
+    peg_v = pe_peg_analysis["peg_ratio"]
+
     comparison_rows = [
         {
+            "Metric": "Trailing P/E Ratio (Valuation Multiple)",
+            "Current / Recent": f"{t_pe_v:.2f}x" if t_pe_v is not None else "N/A",
+            "Own 3–5Yr Historical Benchmark": f"{h_pe_v:.2f}x" if h_pe_v is not None else "N/A",
+            "Momentum / Historical Band": (
+                f"🟢 {pe_peg_analysis['vs_hist_pct']:+.1f}% vs Own Hist P/E (Discount)"
+                if (pe_peg_analysis["vs_hist_pct"] is not None and pe_peg_analysis["vs_hist_pct"] <= 0)
+                else (
+                    f"🔴 {pe_peg_analysis['vs_hist_pct']:+.1f}% vs Own Hist P/E (Premium)"
+                    if pe_peg_analysis["vs_hist_pct"] is not None
+                    else "N/A"
+                )
+            ),
+            "NSE Industry Median": f"{s_pe_v:.2f}x" if s_pe_v is not None else "N/A",
+            "vs. Industry": (
+                "🟢 Cheaper than Sector" if (t_pe_v is not None and s_pe_v is not None and t_pe_v <= s_pe_v)
+                else ("🔴 Premium to Sector" if (t_pe_v is not None and s_pe_v is not None) else "N/A")
+            ),
+        },
+        {
+            "Metric": "PEG Ratio (P/E ÷ Expected Growth g₁)",
+            "Current / Recent": f"{peg_v:.2f}x" if peg_v is not None else "N/A",
+            "Own 3–5Yr Historical Benchmark": "Peter Lynch Benchmark <= 1.2x",
+            "Momentum / Historical Band": pe_peg_analysis["peg_status"],
+            "NSE Industry Median": "1.50x (GARP Threshold)",
+            "vs. Industry": "🏆 Undervalued Growth" if (peg_v is not None and peg_v <= 1.5) else "📉 Stretched Multiple",
+        },
+        {
             "Metric": "Revenue Growth Rate",
-            "Current / Recent (YoY)": fmt_pct(rev_yoy),
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_pct(rev_cagr),
-            "Momentum (Current vs Past)": (
+            "Current / Recent": fmt_pct(rev_yoy),
+            "Own 3–5Yr Historical Benchmark": fmt_pct(rev_cagr),
+            "Momentum / Historical Band": (
                 "🟢 Accelerating" if (rev_yoy is not None and rev_cagr is not None and rev_yoy >= rev_cagr)
                 else ("🟡 Decelerating" if (rev_yoy is not None and rev_cagr is not None) else "N/A")
             ),
@@ -2342,24 +2569,10 @@ def main() -> None:
             ),
         },
         {
-            "Metric": "EBITDA / Operating Profit Growth",
-            "Current / Recent (YoY)": fmt_pct(eb_yoy) if profile["ebitda_applicable"] else "N/A (Financial)",
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_pct(eb_cagr) if profile["ebitda_applicable"] else "N/A (Financial)",
-            "Momentum (Current vs Past)": (
-                "🟢 Accelerating" if (profile["ebitda_applicable"] and eb_yoy is not None and eb_cagr is not None and eb_yoy >= eb_cagr)
-                else ("🟡 Decelerating" if (profile["ebitda_applicable"] and eb_yoy is not None and eb_cagr is not None) else "N/A")
-            ),
-            "NSE Industry Median": fmt_pct(peer_medians.get("rev_growth_med")) if profile["ebitda_applicable"] else "N/A",
-            "vs. Industry": (
-                "🏆 Outperforming" if (profile["ebitda_applicable"] and eb_yoy is not None and peer_medians.get("rev_growth_med") is not None and eb_yoy >= peer_medians["rev_growth_med"])
-                else ("📉 Lagging Sector" if (profile["ebitda_applicable"] and eb_yoy is not None) else "N/A")
-            ),
-        },
-        {
             "Metric": "EBITDA / Operating Margin (OPM %)",
-            "Current / Recent (YoY)": fmt_level_pct(em_curr) if profile["ebitda_applicable"] else "N/A (Financial)",
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_level_pct(em_past) if profile["ebitda_applicable"] else "N/A (Financial)",
-            "Momentum (Current vs Past)": em_momentum,
+            "Current / Recent": fmt_level_pct(em_curr) if profile["ebitda_applicable"] else "N/A (Financial)",
+            "Own 3–5Yr Historical Benchmark": fmt_level_pct(em_past) if profile["ebitda_applicable"] else "N/A (Financial)",
+            "Momentum / Historical Band": em_momentum,
             "NSE Industry Median": fmt_level_pct(peer_medians.get("ebitda_margin_med")) if profile["ebitda_applicable"] else "N/A",
             "vs. Industry": (
                 "🏆 Higher Margin" if (profile["ebitda_applicable"] and em_curr is not None and peer_medians.get("ebitda_margin_med") is not None and em_curr >= peer_medians["ebitda_margin_med"])
@@ -2368,9 +2581,9 @@ def main() -> None:
         },
         {
             "Metric": "Net Profit Margin (NPM %)",
-            "Current / Recent (YoY)": fmt_level_pct(nm_curr),
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_level_pct(nm_past),
-            "Momentum (Current vs Past)": nm_momentum,
+            "Current / Recent": fmt_level_pct(nm_curr),
+            "Own 3–5Yr Historical Benchmark": fmt_level_pct(nm_past),
+            "Momentum / Historical Band": nm_momentum,
             "NSE Industry Median": fmt_level_pct(peer_medians.get("net_margin_med")),
             "vs. Industry": (
                 "🏆 Higher Margin" if (nm_curr is not None and peer_medians.get("net_margin_med") is not None and nm_curr >= peer_medians["net_margin_med"])
@@ -2379,9 +2592,9 @@ def main() -> None:
         },
         {
             "Metric": "Diluted EPS Growth Rate",
-            "Current / Recent (YoY)": fmt_pct(eps_yoy),
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_pct(eps_cagr),
-            "Momentum (Current vs Past)": (
+            "Current / Recent": fmt_pct(eps_yoy),
+            "Own 3–5Yr Historical Benchmark": fmt_pct(eps_cagr),
+            "Momentum / Historical Band": (
                 "🟢 Accelerating" if (eps_yoy is not None and eps_cagr is not None and eps_yoy >= eps_cagr)
                 else ("🟡 Decelerating" if (eps_yoy is not None and eps_cagr is not None) else "N/A")
             ),
@@ -2390,9 +2603,9 @@ def main() -> None:
         },
         {
             "Metric": "Return on Capital Employed (ROCE)",
-            "Current / Recent (YoY)": fmt_level_pct(metrics["roce_pct"]) if profile["roce_applicable"] else "N/A (Financial)",
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_level_pct(metrics["roce_prev_pct"]) if profile["roce_applicable"] else "N/A (Financial)",
-            "Momentum (Current vs Past)": (
+            "Current / Recent": fmt_level_pct(metrics["roce_pct"]) if profile["roce_applicable"] else "N/A (Financial)",
+            "Own 3–5Yr Historical Benchmark": fmt_level_pct(metrics["roce_prev_pct"]) if profile["roce_applicable"] else "N/A (Financial)",
+            "Momentum / Historical Band": (
                 "🟢 Improving Efficiency" if (profile["roce_applicable"] and metrics["roce_pct"] is not None and metrics["roce_prev_pct"] is not None and metrics["roce_pct"] >= metrics["roce_prev_pct"])
                 else ("🟡 Lower vs Past Avg" if (profile["roce_applicable"] and metrics["roce_pct"] is not None and metrics["roce_prev_pct"] is not None) else "N/A")
             ),
@@ -2402,20 +2615,9 @@ def main() -> None:
                 else ("📉 Below Sector ROCE" if (profile["roce_applicable"] and metrics["roce_pct"] is not None and peer_medians.get("roce_med") is not None) else "N/A")
             ),
         },
-        {
-            "Metric": "Return on Equity (ROE)",
-            "Current / Recent (YoY)": fmt_level_pct(metrics["roe_pct"]),
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_level_pct(metrics["roe_pct"]),
-            "Momentum (Current vs Past)": "🟢 Strong Moat (>=15%)" if (metrics["roe_pct"] or 0) >= 15.0 else "🟡 Below 15% Target",
-            "NSE Industry Median": fmt_level_pct(peer_medians.get("roe_med")),
-            "vs. Industry": (
-                "🏆 Superior ROE" if (metrics["roe_pct"] is not None and peer_medians.get("roe_med") is not None and metrics["roe_pct"] >= peer_medians["roe_med"])
-                else "📉 Below Sector ROE"
-            ),
-        },
     ]
 
-    st.markdown("#### 📈 Current vs. Past Annual Growth & Margin Trajectory (Benchmarked vs. NSE Sector Median)")
+    st.markdown("#### 📈 Valuation Multiples (P/E & PEG), Growth & Margin Trajectory vs. History & Industry")
     st.dataframe(pd.DataFrame(comparison_rows).set_index("Metric"), use_container_width=True)
 
     if not df_peers.empty:
@@ -2425,23 +2627,41 @@ def main() -> None:
     st.divider()
 
     # --------------------------------------------------------------------------
-    # SECTION 4: 2-STAGE DCF, GRAHAM & EXPECTED TIMELINE TO INTRINSIC VALUE
+    # SECTION 4: 3-MODEL VALUATION (2-STAGE DCF + GRAHAM + P/E FAIR MULTIPLE)
     # --------------------------------------------------------------------------
-    st.header("4. Intrinsic Value, 3-Scenario DCF / Graham & Expected Convergence Timeline")
-
-    dcf_inputs = extract_dcf_inputs(bundle, metrics)
-    applied_g1 = custom_g1 if use_custom_params else dcf_inputs["base_g1_pct"]
-    applied_r = custom_discount if use_custom_params else dcf_inputs["base_discount_pct"]
-    applied_term_g = custom_term_g if use_custom_params else dcf_inputs["base_terminal_g_pct"]
+    st.header("4. Intrinsic Value, P/E-PEG Sanity Check & 3-Scenario Valuation Matrix")
 
     scenarios = build_three_scenarios(
         dcf_inputs=dcf_inputs,
         base_g1_pct=applied_g1,
         base_discount_pct=applied_r,
         base_terminal_g_pct=applied_term_g,
+        fair_base_pe=pe_peg_analysis["fair_base_pe"],
         current_price=current_price,
     )
     base_res = scenarios["Base Case"]
+
+    # P/E & PEG Sanity Check Banner
+    pe_col_hex = pe_peg_analysis["pe_badge_color"]
+    t_pe_str = f"{t_pe_v:.2f}x" if t_pe_v is not None else "N/A"
+    h_pe_str = f"{h_pe_v:.2f}x" if h_pe_v is not None else "N/A"
+    s_pe_str = f"{s_pe_v:.2f}x" if s_pe_v is not None else "N/A"
+    peg_str = f"{peg_v:.2f}x" if peg_v is not None else "N/A"
+    st.markdown(
+        f"""
+        <div style="background-color: #1e293b; border-left: 6px solid {pe_col_hex}; padding: 12px 16px; border-radius: 6px; margin-bottom: 14px;">
+            <strong style="color: {pe_col_hex}; font-size: 1.0rem;">📐 P/E & PEG Valuation Sanity Check: {pe_peg_analysis['overall_pe_verdict']}</strong><br>
+            <span style="color: #e2e8f0; font-size: 0.93rem;">
+                • <b>Current Trailing P/E:</b> <code>{t_pe_str}</code> &nbsp;|&nbsp;
+                • <b>Own 3–5Yr Historical Median P/E:</b> <code>{h_pe_str}</code> &nbsp;|&nbsp;
+                • <b>NSE Sector Median P/E:</b> <code>{s_pe_str}</code> &nbsp;|&nbsp;
+                • <b>PEG Ratio:</b> <code>{peg_str}</code> ({pe_peg_analysis['peg_status']}) &nbsp;|&nbsp;
+                • <b>P/E & PEG Score:</b> <code>{pe_peg_analysis['total_pe_peg_pts']:.1f} / 10.0 pts</code>
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     fcf_basis_str = format_inr_crores(dcf_inputs["fcf_0"])
     eps_used_str = format_inr_price(dcf_inputs["eps_ttm"])
@@ -2451,16 +2671,17 @@ def main() -> None:
         f"**Cash Flow Basis:** {dcf_inputs['fcf_source']} = **{fcf_basis_str}** | "
         f"**Trailing EPS Used:** {eps_used_str} | "
         f"**Diluted Shares:** {shares_used_str} | "
-        f"**Base Growth (g₁):** `{applied_g1:.2f}%` | **WACC (r):** `{applied_r:.2f}%`"
+        f"**Base Growth (g₁):** `{applied_g1:.2f}%` | **WACC (r):** `{applied_r:.2f}%` | "
+        f"**Target Fair P/E Multiple:** `{pe_peg_analysis['fair_base_pe']:.1f}x`"
     )
 
-    vc1, vc2, vc3, vc4 = st.columns(4)
+    vc1, vc2, vc3, vc4, vc5 = st.columns(5)
     with vc1:
         st.metric("Current Market Price", format_inr_price(current_price))
     with vc2:
         dcf_mos_val = base_res["dcf_mos_pct"]
         st.metric(
-            "2-Stage DCF Value (Base)",
+            "1. 2-Stage DCF Value",
             format_inr_price(base_res["dcf_intrinsic"]),
             delta=f"{dcf_mos_val:+.1f}% MoS" if dcf_mos_val is not None else "N/A",
             delta_color="normal" if (dcf_mos_val or -1) > 0 else "inverse",
@@ -2468,15 +2689,23 @@ def main() -> None:
     with vc3:
         graham_mos_val = base_res["graham_mos_pct"]
         st.metric(
-            "Graham Value (Base)",
+            "2. Graham Formula Value",
             format_inr_price(base_res["graham_intrinsic"]),
             delta=f"{graham_mos_val:+.1f}% MoS" if graham_mos_val is not None else "N/A",
             delta_color="normal" if (graham_mos_val or -1) > 0 else "inverse",
         )
     with vc4:
+        pe_mos_val = base_res["pe_mos_pct"]
+        st.metric(
+            f"3. Fair P/E Target ({base_res['fair_pe_mult']:.1f}x)",
+            format_inr_price(base_res["pe_intrinsic"]),
+            delta=f"{pe_mos_val:+.1f}% MoS" if pe_mos_val is not None else "N/A",
+            delta_color="normal" if (pe_mos_val or -1) > 0 else "inverse",
+        )
+    with vc5:
         blended_mos_val = base_res["blended_mos_pct"]
         st.metric(
-            "Blended Intrinsic Value (Base)",
+            "3-Model Blended Value",
             format_inr_price(base_res["blended_intrinsic"]),
             delta=f"{blended_mos_val:+.1f}% Blended MoS" if blended_mos_val is not None else "N/A",
             delta_color="normal" if (blended_mos_val or -1) > 0 else "inverse",
@@ -2491,10 +2720,11 @@ def main() -> None:
                 "Scenario": scen_label,
                 "Stage-1 Growth (g₁)": f"{s['g1_pct']:.2f}%",
                 "Discount Rate (r)": f"{s['discount_pct']:.2f}%",
-                "Terminal Growth": f"{s['terminal_g_pct']:.2f}%",
+                "Target P/E Multiple": f"{s['fair_pe_mult']:.1f}x",
                 "2-Stage DCF / Share": format_inr_price(s["dcf_intrinsic"]),
                 "Graham Value / Share": format_inr_price(s["graham_intrinsic"]),
-                "Blended Value / Share": format_inr_price(s["blended_intrinsic"]),
+                "Fair P/E Value / Share": format_inr_price(s["pe_intrinsic"]),
+                "3-Model Blended Value": format_inr_price(s["blended_intrinsic"]),
                 "Blended Margin of Safety": f"{s_mos:+.2f}%" if s_mos is not None else "N/A",
                 "Tentative Timeline to Reach IV": s["est_years_label"],
             }
@@ -2525,6 +2755,7 @@ def main() -> None:
         profile=profile,
         metrics=metrics,
         qtr_analysis=qtr_analysis,
+        pe_peg_analysis=pe_peg_analysis,
         peer_medians=peer_medians,
         scenarios=scenarios,
         news_summary=news_summary,
@@ -2532,12 +2763,14 @@ def main() -> None:
         user_confirmed_count=user_confirmed_count,
     )
 
-    dc1, dc2, dc3 = st.columns(3)
+    dc1, dc2, dc3, dc4 = st.columns(4)
     with dc1:
-        st.metric("Fundamentals, Quarterly Trend & Valuation (70%)", f"{decision['fundamental_score_70']:.1f} / 70.0")
+        st.metric("Fundamentals, P/E-PEG & DCF (70%)", f"{decision['fundamental_score_70']:.1f} / 70.0")
     with dc2:
-        st.metric("Corporate Catalyst Sentiment (30%)", f"{decision['sentiment_score_30']:.1f} / 30.0")
+        st.metric("P/E & PEG Multiple Sub-Score", f"{decision['pe_peg_pts']:.1f} / 10.0")
     with dc3:
+        st.metric("Corporate Catalyst Sentiment (30%)", f"{decision['sentiment_score_30']:.1f} / 30.0")
+    with dc4:
         st.metric("Composite Fundamental Value Score", f"{decision['total_score']:.1f} / 100")
 
     st.progress(int(round(decision["total_score"])))
@@ -2561,7 +2794,7 @@ def main() -> None:
                 <span style="color: {decision['badge_color']};">{decision['verdict']}</span>
             </h2>
             <p style="color: #38bdf8; font-size: 1.05rem; font-weight: 600; margin: 0 0 6px 0;">
-                ⏳ Tentative Expected Time to Reach Base-Case Intrinsic Value ({base_iv_fmt}):
+                ⏳ Tentative Expected Time to Reach Base-Case 3-Model Intrinsic Value ({base_iv_fmt}):
                 <span style="color: #f8fafc;">{decision['base_timeline_label']}</span>
             </p>
             <p style="color: #94a3b8; font-size: 0.92rem; margin: 0;">
