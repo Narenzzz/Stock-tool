@@ -131,6 +131,14 @@ def format_large_currency(value: Optional[float], currency_code: str = "USD") ->
     return f"{sign}{sym}{abs_val:,.0f}"
 
 
+def format_shares(shares_val: Optional[float], currency_code: str = "USD") -> str:
+    if shares_val is None or np.isnan(shares_val) or shares_val <= 0:
+        return "N/A"
+    if (currency_code or "").upper() == "INR":
+        return f"{shares_val / 1e7:,.2f} Cr"
+    return f"{shares_val / 1e9:,.2f}B"
+
+
 def get_statement_row(df: pd.DataFrame, possible_labels: List[str]) -> Optional[pd.Series]:
     if df is None or df.empty:
         return None
@@ -143,10 +151,6 @@ def get_statement_row(df: pd.DataFrame, possible_labels: List[str]) -> Optional[
 
 
 def classify_industry_profile(sector: str, industry: str, ticker: str = "") -> Dict[str, Any]:
-    """
-    Classifies the company into a specific sector archetype so the app can route
-    both mathematical formulas and the Sector-Specific Value Investing Checklist.
-    """
     sec_lower = (sector or "").lower()
     ind_lower = (industry or "").lower()
     t_upper = (ticker or "").upper()
@@ -216,7 +220,6 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
     except Exception:
         info = {}
 
-    # Also extract fast_info as a rate-limit-proof backup for price, market cap, and shares
     fast_price = None
     fast_mcap = None
     fast_shares = None
@@ -280,7 +283,7 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
     except Exception:
         raw_news = []
 
-    sector = info.get("sector") or ("Technology" if "TCS" in ticker_clean or "INFY" in ticker_clean else "Industrials")
+    sector = info.get("sector") or ("Technology" if ("TCS" in ticker_clean or "INFY" in ticker_clean) else "Industrials")
     industry = info.get("industry") or "General"
     profile = classify_industry_profile(sector, industry, ticker_clean)
 
@@ -331,11 +334,9 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         inc, ["Net Income", "Net Income Common Stockholders", "Net Income Continuous Operations"]
     )
     eps_s = get_statement_row(inc, ["Diluted EPS", "Basic EPS"])
-    shares_s = get_statement_row(
-        inc, ["Diluted Average Shares", "Basic Average Shares"]
-    ) or get_statement_row(
-        bs, ["Ordinary Shares Number", "Share Issued", "Common Stock"]
-    )
+    shares_s = get_statement_row(inc, ["Diluted Average Shares", "Basic Average Shares"])
+    if shares_s is None:
+        shares_s = get_statement_row(bs, ["Ordinary Shares Number", "Share Issued", "Common Stock"])
 
     assets_s = get_statement_row(bs, ["Total Assets"])
     curr_liab_s = get_statement_row(bs, ["Current Liabilities", "Total Current Liabilities"])
@@ -349,7 +350,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     fcf_s = get_statement_row(cf, ["Free Cash Flow"])
     ocf_s = get_statement_row(
-        cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities", "Operating Cash Flow"]
+        cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"]
     )
     capex_s = get_statement_row(cf, ["Capital Expenditure", "Capital Expenditures"])
     buyback_cf_s = get_statement_row(
@@ -528,9 +529,10 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     if buyback_detected and eps_buyback_boost_pct is not None and eps_buyback_boost_pct >= 1.5:
         buyback_verdict = "BUYBACK-BOOSTED EPS"
         sh_str = f"{share_change_pct:+.2f}%" if share_change_pct is not None else "reduced"
+        bb_cash_str = format_large_currency(total_3yr_buyback_cash, bundle["currency"])
         buyback_explanation = (
             f"Share count changed by {sh_str} over the multi-year window "
-            f"(3-Yr Buybacks: {format_large_currency(total_3yr_buyback_cash, bundle['currency'])}). "
+            f"(3-Yr Buybacks: {bb_cash_str}). "
             f"EPS grew at {eps_cagr:+.2f}%/yr vs Net Income growth of {ni_cagr:+.2f}%/yr — meaning "
             f"+{eps_buyback_boost_pct:.2f}%/yr of EPS growth came from share buybacks shrinking the share base."
         )
@@ -632,7 +634,7 @@ def build_three_year_history_table(bundle: Dict[str, Any]) -> pd.DataFrame:
                 "EBITDA Margin": f"{ebitda_margin:.2f}%" if ebitda_margin is not None else "N/A (Financial)",
                 "Net Profit Margin": f"{net_margin:.2f}%" if net_margin is not None else "N/A",
                 "Diluted EPS": format_price(eps_v, currency),
-                "Diluted Shares": f"{sh_v / 1e7:,.2f} Cr" if (sh_v and currency == "INR") else (f"{sh_v / 1e9:,.2f}B" if sh_v else "N/A"),
+                "Diluted Shares": format_shares(sh_v, currency),
                 "Free Cash Flow": format_large_currency(fcf, currency),
             }
         )
@@ -680,6 +682,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
     if archetype == "MANUFACTURING_INDUSTRIAL":
         sector_title = "🏭 Manufacturing, Auto & Heavy Industrials Checklist"
         moat_focus = "Capital efficiency on physical plants (ROCE), debt discipline across cycles, and positive Free Cash Flow after CapEx."
+        em_str = f"{em:.2f}% (3Y Avg: {em_past:.1f}%)" if (em is not None and em_past is not None) else (f"{em:.2f}%" if em is not None else "N/A")
         quant_checks = [
             {
                 "Parameter": "Return on Capital Employed (ROCE)",
@@ -705,7 +708,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
             {
                 "Parameter": "Operating EBITDA Margin Stability",
                 "Target Benchmark": ">= 12.0% & Stable vs 3-Yr Avg",
-                "Actual Value": f"{em:.2f}% (3Y Avg: {em_past:.1f}%)" if (em is not None and em_past is not None) else (f"{em:.2f}%" if em is not None else "N/A"),
+                "Actual Value": em_str,
                 "Status": status_badge(em >= 12.0 if em is not None else None, borderline=(em is not None and 8.0 <= em < 12.0)),
                 "Why It Matters in This Sector": "Demonstrates ability to pass raw material cost spikes on to customers.",
             },
@@ -758,11 +761,12 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
     elif archetype == "IT_TECH":
         sector_title = "💻 Information Technology, Software & Platform Checklist"
         moat_focus = "Asset-light scalability, high client switching costs, strong cash conversion (OCF/Net Income), and organic EPS growth."
+        roe_roce_str = f"ROE: {roe:.1f}% | ROCE: {roce:.1f}%" if (roe is not None and roce is not None) else (f"ROE: {roe:.1f}%" if roe is not None else "N/A")
         quant_checks = [
             {
                 "Parameter": "Return on Equity & ROCE",
                 "Target Benchmark": "ROE >= 20% & ROCE >= 20%",
-                "Actual Value": f"ROE: {roe:.1f}% | ROCE: {roce:.1f}%" if (roe is not None and roce is not None) else (f"ROE: {roe:.1f}%" if roe is not None else "N/A"),
+                "Actual Value": roe_roce_str,
                 "Status": status_badge((roe or 0) >= 20.0 and (roce or 20.0) >= 20.0 if (roe is not None or roce is not None) else None, borderline=((roe or 0) >= 15.0)),
                 "Why It Matters in This Sector": "Asset-light tech leaders should generate exceptional returns on minimal physical capital.",
             },
@@ -872,7 +876,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
             "R&D & Patent Cliff: Is the complex generics / domestic branded pipeline strong enough to offset pricing erosion?",
         ]
 
-    else:  # ENERGY_UTILITIES
+    else:
         sector_title = "⚡ Energy, Oil & Gas, Power & Utilities Checklist"
         moat_focus = "Low production cost, regulated/contracted cash flows, manageable debt-to-capital, and sustainable dividend/FCF yield."
         quant_checks = [
@@ -927,16 +931,12 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
 
 
 # ==============================================================================
-# 4. LIGHTWEIGHT INDUSTRY PEER BENCHMARKING ENGINE (ANTI-RATE-LIMIT)
+# 4. LIGHTWEIGHT INDUSTRY PEER BENCHMARKING ENGINE
 # ==============================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_industry_peer_benchmarks(
     target_ticker: str, sector: str, currency: str, custom_peers_str: str = ""
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[float]]]:
-    """
-    Lightweight peer fetcher: queries only summary metrics (1 call per peer instead of 3)
-    so Yahoo Finance does not rate-limit Streamlit Cloud.
-    """
     is_india = currency == "INR" or target_ticker.endswith((".NS", ".BO"))
     peer_map = INDIA_SECTOR_PEERS if is_india else US_SECTOR_PEERS
     default_peers = peer_map.get(
@@ -965,7 +965,6 @@ def fetch_industry_peer_benchmarks(
             roa_v = safe_float(p_info.get("returnOnAssets"))
             pe_v = safe_float(p_info.get("trailingPE")) or safe_float(p_info.get("forwardPE"))
 
-            # Approximate ROCE from Operating Margin & Asset/Equity Turnover if statements aren't pulled
             roce_approx = (roe_v * 0.88 * 100.0) if roe_v is not None else (roa_v * 1.4 * 100.0 if roa_v is not None else np.nan)
 
             rows.append(
@@ -1008,10 +1007,6 @@ def fetch_industry_peer_benchmarks(
 # 5. BULLETPROOF 2-STAGE DCF & BENJAMIN GRAHAM SCENARIO ENGINE
 # ==============================================================================
 def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Bulletproof extraction of Shares, EPS, FCF, Cash, Debt, Growth, and Discount Rate
-    with 4-layer fallbacks so Intrinsic Value never turns N/A if Yahoo throttles ticker.info.
-    """
     info = bundle["info"]
     inc = bundle["income_stmt"]
     bs = bundle["balance_sheet"]
@@ -1019,7 +1014,6 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
     currency = bundle["currency"]
     current_price = bundle["current_price"]
 
-    # --- 1. 4-Layer Fallback for Shares Outstanding ---
     shares = (
         safe_float(info.get("sharesOutstanding"))
         or safe_float(info.get("impliedSharesOutstanding"))
@@ -1031,12 +1025,10 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         if mcap and current_price > 0:
             shares = mcap / current_price
 
-    # Final fallback: derive Shares = Net Income / Diluted EPS
     if (shares is None or shares <= 0) and metrics.get("latest_ni") and metrics.get("latest_stmt_eps"):
         if metrics["latest_stmt_eps"] > 0 and metrics["latest_ni"] > 0:
             shares = metrics["latest_ni"] / metrics["latest_stmt_eps"]
 
-    # --- 2. 4-Layer Fallback for Base Free Cash Flow (FCF_0) ---
     fcf_0 = safe_float(info.get("freeCashflow"))
     fcf_source = "Reported TTM Free Cash Flow"
 
@@ -1069,7 +1061,6 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
             fcf_0 = ni_val * 0.85
             fcf_source = "Normalized Owner Earnings (85% of Net Income Proxy)"
 
-    # --- 3. 4-Layer Fallback for Trailing EPS (for Graham Formula) ---
     eps_ttm = (
         safe_float(info.get("trailingEps"))
         or safe_float(info.get("forwardEps"))
@@ -1082,12 +1073,10 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         if fcf_0 > 0:
             eps_ttm = fcf_0 / shares
 
-    # If FCF_0 was still missing but EPS and Shares exist, reconstruct FCF_0 from EPS * Shares * 0.85
     if (fcf_0 is None or fcf_0 <= 0) and eps_ttm and eps_ttm > 0 and shares and shares > 0:
         fcf_0 = eps_ttm * shares * 0.85
         fcf_source = "Implied Owner Earnings (85% of EPS × Shares)"
 
-    # --- 4. Total Cash & Total Debt for Equity Bridge ---
     total_cash = safe_float(info.get("totalCash"))
     if total_cash is None:
         cash_s = get_statement_row(
@@ -1104,13 +1093,16 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         total_cash = 0.0
         total_debt = 0.0
 
-    # --- 5. Stage-1 Growth Rate (g1 %) ---
+    eg_info = safe_float(info.get("earningsGrowth"))
+    rg_info = safe_float(info.get("revenueGrowth"))
+    eqg_info = safe_float(info.get("earningsQuarterlyGrowth"))
+
     candidates = [
         v
         for v in [
-            safe_float(info.get("earningsGrowth")) * 100.0 if safe_float(info.get("earningsGrowth")) is not None else None,
-            safe_float(info.get("revenueGrowth")) * 100.0 if safe_float(info.get("revenueGrowth")) is not None else None,
-            safe_float(info.get("earningsQuarterlyGrowth")) * 100.0 if safe_float(info.get("earningsQuarterlyGrowth")) is not None else None,
+            eg_info * 100.0 if eg_info is not None else None,
+            rg_info * 100.0 if rg_info is not None else None,
+            eqg_info * 100.0 if eqg_info is not None else None,
             metrics["rev_growth"]["recent_yoy_pct"],
             metrics["rev_growth"]["past_cagr_pct"],
             metrics["ni_growth"]["recent_yoy_pct"],
@@ -1122,7 +1114,6 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
     est_g1 = float(np.median(candidates)) if candidates else default_g
     base_g1_pct = float(np.clip(est_g1, 2.0, 20.0))
 
-    # --- 6. Discount Rate (WACC / CAPM r %) & Terminal Growth ---
     beta = safe_float(info.get("beta"), default=1.0) or 1.0
     beta_clamped = float(np.clip(beta, 0.6, 1.8))
 
@@ -1344,7 +1335,6 @@ def compute_decision_verdict(
     roce = metrics.get("roce_pct")
     roa = metrics.get("roa_pct")
 
-    # 1. Margin of Safety Sub-Score (0 - 25 pts)
     if mos is None:
         mos_pts = 5.0
     elif mos >= 30.0:
@@ -1356,7 +1346,6 @@ def compute_decision_verdict(
     else:
         mos_pts = 0.0
 
-    # 2. ROE & ROCE / ROA Capital Efficiency Sub-Score (0 - 20 pts)
     roe_pts = min(10.0, max(0.0, ((roe or 0.0) / 20.0) * 10.0)) if roe is not None else 5.0
     if profile["roce_applicable"]:
         roce_pts = min(10.0, max(0.0, ((roce or 0.0) / 20.0) * 10.0)) if roce is not None else 5.0
@@ -1364,7 +1353,6 @@ def compute_decision_verdict(
         roce_pts = min(10.0, max(0.0, ((roa or 0.0) / 1.5) * 10.0)) if roa is not None else 5.0
     efficiency_pts = roe_pts + roce_pts
 
-    # 3. Growth Acceleration, Margin Expansion & Buyback Quality (0 - 15 pts)
     rev_yoy = metrics["rev_growth"]["recent_yoy_pct"]
     rev_cagr = metrics["rev_growth"]["past_cagr_pct"]
     growth_pts = 4.0
@@ -1386,7 +1374,6 @@ def compute_decision_verdict(
     growth_pts += min(2.5, user_confirmed_count * (2.5 / 3.0))
     growth_pts = min(15.0, growth_pts)
 
-    # 4. Sector Checklist Pass Rate & Industry Peer Comparison (0 - 10 pts)
     quant_pass_ratio = checklist_result["pass_count"] / max(1, checklist_result["total_checks"])
     bs_peer_pts = quant_pass_ratio * 6.0
 
@@ -1404,7 +1391,6 @@ def compute_decision_verdict(
 
     fundamental_score_70 = mos_pts + efficiency_pts + growth_pts + bs_peer_pts
 
-    # 5. Sentiment Sub-Score (0 - 30 pts)
     avg_comp = news_summary.get("avg_compound", 0.0)
     clamped_comp = float(np.clip(avg_comp, -0.5, 0.5))
     sentiment_score_30 = ((clamped_comp + 0.5) / 1.0) * 30.0
@@ -1439,9 +1425,8 @@ def compute_decision_verdict(
 
     risk_factors = []
     if checklist_result["pass_count"] <= 2:
-        risk_factors.append(
-            f"failing {checklist_result['total_checks'] - checklist_result['pass_count']} mandatory sector checklist thresholds"
-        )
+        failed_num = checklist_result["total_checks"] - checklist_result["pass_count"]
+        risk_factors.append(f"failing {failed_num} mandatory sector checklist thresholds")
     if rev_yoy is not None and rev_cagr is not None and rev_yoy < rev_cagr - 3.0:
         risk_factors.append("recent top-line revenue deceleration relative to its 3-year CAGR")
     if metrics["buyback_verdict"] == "BUYBACK-BOOSTED EPS":
@@ -1606,20 +1591,24 @@ def main() -> None:
     k1, k2, k3, k4, k5 = st.columns(5)
     with k1:
         roe_v = metrics["roe_pct"]
+        roe_med_v = peer_medians.get("roe_med")
+        roe_delta = f"vs {roe_med_v:.1f}% Peer Med" if (roe_v is not None and roe_med_v is not None) else "Target >= 15%"
         st.metric(
             label="Return on Equity (ROE)",
             value=f"{roe_v:.2f}%" if roe_v is not None else "N/A",
-            delta=f"vs {peer_medians['roe_med']:.1f}% Peer Med" if (roe_v is not None and peer_medians["roe_med"] is not None) else "Target >= 15%",
-            delta_color="normal" if (roe_v is not None and roe_v >= (peer_medians["roe_med"] or 15.0)) else "inverse",
+            delta=roe_delta,
+            delta_color="normal" if (roe_v is not None and roe_v >= (roe_med_v or 15.0)) else "inverse",
         )
     with k2:
         roce_v = metrics["roce_pct"]
+        roce_med_v = peer_medians.get("roce_med")
         if profile["roce_applicable"]:
+            roce_delta = f"vs {roce_med_v:.1f}% Peer Med" if (roce_v is not None and roce_med_v is not None) else "Target >= 15%"
             st.metric(
                 label="Return on Capital (ROCE)",
                 value=f"{roce_v:.2f}%" if roce_v is not None else "N/A",
-                delta=f"vs {peer_medians['roce_med']:.1f}% Peer Med" if (roce_v is not None and peer_medians["roce_med"] is not None) else "Target >= 15%",
-                delta_color="normal" if (roce_v is not None and roce_v >= (peer_medians["roce_med"] or 15.0)) else "inverse",
+                delta=roce_delta,
+                delta_color="normal" if (roce_v is not None and roce_v >= (roce_med_v or 15.0)) else "inverse",
             )
         else:
             st.metric(label="ROCE (EBIT / Cap Emp)", value="N/A (Bank/NBFC)", delta="See ROA & ROE", delta_color="off")
@@ -1692,12 +1681,13 @@ def main() -> None:
 
         pass_c = checklist_result["pass_count"]
         tot_c = checklist_result["total_checks"]
+        qual_tot = len(checklist_result["qual_questions"])
         badge_bg = "#16a34a" if pass_c >= 3 else ("#d97706" if pass_c == 2 else "#dc2626")
         st.markdown(
             f"""
             <div style="background-color: #1e293b; border-left: 6px solid {badge_bg}; padding: 12px 14px; border-radius: 6px; margin-top: 10px;">
                 <strong style="color: #f8fafc;">Automated Sector Pass Rate: <span style="color: {badge_bg};">{pass_c} / {tot_c} Passed</span></strong><br>
-                <span style="color: #cbd5e1; font-size: 0.88rem;">Qualitative Investor Checks Confirmed: {user_confirmed_count} / {len(checklist_result['qual_questions'])}</span>
+                <span style="color: #cbd5e1; font-size: 0.88rem;">Qualitative Investor Checks Confirmed: {user_confirmed_count} / {qual_tot}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1733,6 +1723,22 @@ def main() -> None:
     ni_yoy, ni_cagr = metrics["ni_growth"]["recent_yoy_pct"], metrics["ni_growth"]["past_cagr_pct"]
     eps_yoy, eps_cagr = metrics["eps_growth"]["recent_yoy_pct"], metrics["eps_growth"]["past_cagr_pct"]
 
+    em_curr = metrics["ebitda_margin_curr"]
+    em_past = metrics["ebitda_margin_past"]
+    if profile["ebitda_applicable"] and em_curr is not None and em_past is not None:
+        em_diff = em_curr - em_past
+        em_momentum = f"🟢 Expanding ({em_diff:+.2f}%)" if em_diff >= 0 else f"🔴 Compressing ({em_diff:+.2f}%)"
+    else:
+        em_momentum = "N/A"
+
+    nm_curr = metrics["net_margin_curr"]
+    nm_past = metrics["net_margin_past"]
+    if nm_curr is not None and nm_past is not None:
+        nm_diff = nm_curr - nm_past
+        nm_momentum = f"🟢 Expanding ({nm_diff:+.2f}%)" if nm_diff >= 0 else f"🔴 Compressing ({nm_diff:+.2f}%)"
+    else:
+        nm_momentum = "N/A"
+
     comparison_rows = [
         {
             "Metric": "Revenue Growth Rate",
@@ -1761,40 +1767,24 @@ def main() -> None:
         },
         {
             "Metric": "EBITDA Margin (%)",
-            "Current / Recent (YoY)": fmt_level_pct(metrics["ebitda_margin_curr"]) if profile["ebitda_applicable"] else "N/A (Financial)",
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_level_pct(metrics["ebitda_margin_past"]) if profile["ebitda_applicable"] else "N/A (Financial)",
-            "Momentum (Current vs Past)": (
-                f"🟢 Expanding ({metrics['ebitda_margin_curr'] - metrics['ebitda_margin_past']:+.2f}%)"
-                if (profile["ebitda_applicable"] and metrics["ebitda_margin_curr"] is not None and metrics["ebitda_margin_past"] is not None and metrics["ebitda_margin_curr"] >= metrics["ebitda_margin_past"])
-                else (
-                    f"🔴 Compressing ({metrics['ebitda_margin_curr'] - metrics['ebitda_margin_past']:+.2f}%)"
-                    if (profile["ebitda_applicable"] and metrics["ebitda_margin_curr"] is not None and metrics["ebitda_margin_past"] is not None)
-                    else "N/A"
-                )
-            ),
+            "Current / Recent (YoY)": fmt_level_pct(em_curr) if profile["ebitda_applicable"] else "N/A (Financial)",
+            "Past 3-Yr Historical (CAGR / Avg)": fmt_level_pct(em_past) if profile["ebitda_applicable"] else "N/A (Financial)",
+            "Momentum (Current vs Past)": em_momentum,
             "Industry Peer Median": fmt_level_pct(peer_medians.get("ebitda_margin_med")) if profile["ebitda_applicable"] else "N/A",
             "vs. Industry": (
-                "🏆 Higher Margin" if (profile["ebitda_applicable"] and metrics["ebitda_margin_curr"] is not None and peer_medians.get("ebitda_margin_med") is not None and metrics["ebitda_margin_curr"] >= peer_medians["ebitda_margin_med"])
-                else ("📉 Below Peer Margin" if (profile["ebitda_applicable"] and metrics["ebitda_margin_curr"] is not None and peer_medians.get("ebitda_margin_med") is not None) else "N/A")
+                "🏆 Higher Margin" if (profile["ebitda_applicable"] and em_curr is not None and peer_medians.get("ebitda_margin_med") is not None and em_curr >= peer_medians["ebitda_margin_med"])
+                else ("📉 Below Peer Margin" if (profile["ebitda_applicable"] and em_curr is not None and peer_medians.get("ebitda_margin_med") is not None) else "N/A")
             ),
         },
         {
             "Metric": "Net Profit Margin (%)",
-            "Current / Recent (YoY)": fmt_level_pct(metrics["net_margin_curr"]),
-            "Past 3-Yr Historical (CAGR / Avg)": fmt_level_pct(metrics["net_margin_past"]),
-            "Momentum (Current vs Past)": (
-                f"🟢 Expanding ({metrics['net_margin_curr'] - metrics['net_margin_past']:+.2f}%)"
-                if (metrics["net_margin_curr"] is not None and metrics["net_margin_past"] is not None and metrics["net_margin_curr"] >= metrics["net_margin_past"])
-                else (
-                    f"🔴 Compressing ({metrics['net_margin_curr'] - metrics['net_margin_past']:+.2f}%)"
-                    if (metrics["net_margin_curr"] is not None and metrics["net_margin_past"] is not None)
-                    else "N/A"
-                )
-            ),
+            "Current / Recent (YoY)": fmt_level_pct(nm_curr),
+            "Past 3-Yr Historical (CAGR / Avg)": fmt_level_pct(nm_past),
+            "Momentum (Current vs Past)": nm_momentum,
             "Industry Peer Median": fmt_level_pct(peer_medians.get("net_margin_med")),
             "vs. Industry": (
-                "🏆 Higher Margin" if (metrics["net_margin_curr"] is not None and peer_medians.get("net_margin_med") is not None and metrics["net_margin_curr"] >= peer_medians["net_margin_med"])
-                else ("📉 Below Peer Margin" if (metrics["net_margin_curr"] is not None and peer_medians.get("net_margin_med") is not None) else "N/A")
+                "🏆 Higher Margin" if (nm_curr is not None and peer_medians.get("net_margin_med") is not None and nm_curr >= peer_medians["net_margin_med"])
+                else ("📉 Below Peer Margin" if (nm_curr is not None and peer_medians.get("net_margin_med") is not None) else "N/A")
             ),
         },
         {
@@ -1852,10 +1842,14 @@ def main() -> None:
     )
     base_res = scenarios["Base Case"]
 
+    fcf_basis_str = format_large_currency(dcf_inputs["fcf_0"], currency)
+    eps_used_str = format_price(dcf_inputs["eps_ttm"], currency)
+    shares_used_str = format_shares(dcf_inputs["shares"], currency)
+
     st.caption(
-        f"**Cash Flow Basis:** {dcf_inputs['fcf_source']} = **{format_large_currency(dcf_inputs['fcf_0'], currency)}** | "
-        f"**Trailing EPS Used:** {format_price(dcf_inputs['eps_ttm'], currency)} | "
-        f"**Diluted Shares:** {f\"{dcf_inputs['shares'] / 1e7:,.2f} Cr\" if (dcf_inputs['shares'] and currency == 'INR') else (f\"{dcf_inputs['shares'] / 1e9:,.2f}B\" if dcf_inputs['shares'] else 'N/A')} | "
+        f"**Cash Flow Basis:** {dcf_inputs['fcf_source']} = **{fcf_basis_str}** | "
+        f"**Trailing EPS Used:** {eps_used_str} | "
+        f"**Diluted Shares:** {shares_used_str} | "
         f"**Base Growth (g₁):** `{applied_g1:.2f}%` | **WACC (r):** `{applied_r:.2f}%`"
     )
 
@@ -1863,30 +1857,34 @@ def main() -> None:
     with vc1:
         st.metric("Current Market Price", format_price(current_price, currency))
     with vc2:
+        dcf_mos_val = base_res["dcf_mos_pct"]
         st.metric(
             "2-Stage DCF Value (Base)",
             format_price(base_res["dcf_intrinsic"], currency),
-            delta=f"{base_res['dcf_mos_pct']:+.1f}% MoS" if base_res["dcf_mos_pct"] is not None else "N/A",
-            delta_color="normal" if (base_res["dcf_mos_pct"] or -1) > 0 else "inverse",
+            delta=f"{dcf_mos_val:+.1f}% MoS" if dcf_mos_val is not None else "N/A",
+            delta_color="normal" if (dcf_mos_val or -1) > 0 else "inverse",
         )
     with vc3:
+        graham_mos_val = base_res["graham_mos_pct"]
         st.metric(
             "Graham Value (Base)",
             format_price(base_res["graham_intrinsic"], currency),
-            delta=f"{base_res['graham_mos_pct']:+.1f}% MoS" if base_res["graham_mos_pct"] is not None else "N/A",
-            delta_color="normal" if (base_res["graham_mos_pct"] or -1) > 0 else "inverse",
+            delta=f"{graham_mos_val:+.1f}% MoS" if graham_mos_val is not None else "N/A",
+            delta_color="normal" if (graham_mos_val or -1) > 0 else "inverse",
         )
     with vc4:
+        blended_mos_val = base_res["blended_mos_pct"]
         st.metric(
             "Blended Intrinsic Value (Base)",
             format_price(base_res["blended_intrinsic"], currency),
-            delta=f"{base_res['blended_mos_pct']:+.1f}% Blended MoS" if base_res["blended_mos_pct"] is not None else "N/A",
-            delta_color="normal" if (base_res["blended_mos_pct"] or -1) > 0 else "inverse",
+            delta=f"{blended_mos_val:+.1f}% Blended MoS" if blended_mos_val is not None else "N/A",
+            delta_color="normal" if (blended_mos_val or -1) > 0 else "inverse",
         )
 
     scenario_rows = []
     for scen_label in ["Conservative", "Base Case", "Optimistic"]:
         s = scenarios[scen_label]
+        s_mos = s["blended_mos_pct"]
         scenario_rows.append(
             {
                 "Scenario": scen_label,
@@ -1896,7 +1894,7 @@ def main() -> None:
                 "2-Stage DCF / Share": format_price(s["dcf_intrinsic"], currency),
                 "Graham Value / Share": format_price(s["graham_intrinsic"], currency),
                 "Blended Value / Share": format_price(s["blended_intrinsic"], currency),
-                "Blended Margin of Safety": f"{s['blended_mos_pct']:+.2f}%" if s["blended_mos_pct"] is not None else "N/A",
+                "Blended Margin of Safety": f"{s_mos:+.2f}%" if s_mos is not None else "N/A",
             }
         )
     st.dataframe(pd.DataFrame(scenario_rows).set_index("Scenario"), use_container_width=True)
