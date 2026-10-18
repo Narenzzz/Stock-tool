@@ -46,7 +46,6 @@ US_PRESETS = {
     "XOM": "Exxon Mobil Corporation (Energy)",
 }
 
-# Sector-to-Peer mapping for automated Industry Benchmarking
 INDIA_SECTOR_PEERS = {
     "Technology": ["TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS"],
     "Financial Services": ["HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "BAJFINANCE.NS"],
@@ -145,36 +144,53 @@ def get_statement_row(df: pd.DataFrame, possible_labels: List[str]) -> Optional[
 
 def classify_industry_profile(sector: str, industry: str) -> Dict[str, Any]:
     """
-    Determines which metrics apply to the company's specific sector/industry.
-    Banks, NBFCs, and Insurance firms do not use EBITDA, ROCE, or standard D/E.
+    Classifies the company into a specific sector archetype so the app can route
+    both mathematical formulas and the Sector-Specific Value Investing Checklist.
     """
     sec_lower = (sector or "").lower()
     ind_lower = (industry or "").lower()
+
     financial_keywords = ["bank", "financial", "insurance", "credit", "capital markets", "nbfc", "lending"]
     is_financial = any(k in sec_lower or k in ind_lower for k in financial_keywords)
 
     if is_financial:
+        archetype = "BANKING_NBFC"
+    elif any(k in sec_lower or k in ind_lower for k in ["technology", "software", "it services", "semiconductor", "internet"]):
+        archetype = "IT_TECH"
+    elif any(k in sec_lower or k in ind_lower for k in ["consumer defensive", "fmcg", "packaged foods", "household", "beverages", "tobacco"]):
+        archetype = "FMCG_CONSUMER"
+    elif any(k in sec_lower or k in ind_lower for k in ["healthcare", "pharma", "biotech", "medical", "diagnostics"]):
+        archetype = "PHARMA_HEALTH"
+    elif any(k in sec_lower or k in ind_lower for k in ["energy", "oil", "gas", "utilities", "power", "renewable"]):
+        archetype = "ENERGY_UTILITIES"
+    else:
+        # Covers Industrials, Manufacturing, Auto, Basic Materials, Steel, Chemicals, Consumer Cyclical
+        archetype = "MANUFACTURING_INDUSTRIAL"
+
+    if is_financial:
         return {
             "is_financial": True,
+            "archetype": archetype,
             "profile_name": "Banking / NBFC / Financial Institution",
             "roce_applicable": False,
             "ebitda_applicable": False,
             "de_applicable": False,
             "applicable_note": (
-                "Financial Institution Detected: Debt/Deposits are raw operating capital for lenders. "
-                "EBITDA, ROCE, and Debt-to-Equity are automatically marked N/A; evaluation focuses on "
-                "ROE (>=14%), ROA (>=1.2%), Net Profit Margin, and Price-to-Book."
+                "Financial Institution Detected: Deposits & borrowings are operational raw material for lenders. "
+                "EBITDA, ROCE, and Debt-to-Equity are marked N/A; analysis prioritizes ROE (>=14%), ROA (>=1.2%), "
+                "Net Profit Margin, and Price-to-Book (P/B)."
             ),
         }
     return {
         "is_financial": False,
-        "profile_name": f"Operating Business ({sector or 'General Industry'})",
+        "archetype": archetype,
+        "profile_name": f"Operating Business ({sector or 'Manufacturing / Services'})",
         "roce_applicable": True,
         "ebitda_applicable": True,
         "de_applicable": True,
         "applicable_note": (
             "Standard Operating Company: Full analysis active across ROE, ROCE (EBIT / Capital Employed), "
-            "EBITDA Margin, Debt-to-Equity, Free Cash Flow, and Share Buyback EPS Quality."
+            "EBITDA Margin, Debt-to-Equity, Free Cash Flow conversion, and Share Buyback EPS Quality."
         ),
     }
 
@@ -234,8 +250,8 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
     except Exception:
         raw_news = []
 
-    sector = info.get("sector") or "Technology"
-    industry = info.get("industry") or "General"
+    sector = info.get("sector") or "Industrials"
+    industry = info.get("industry") or "General Manufacturing"
     profile = classify_industry_profile(sector, industry)
 
     return {
@@ -257,7 +273,6 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
 # 2. ROE, ROCE, EBITDA, GROWTH MOMENTUM & BUYBACK FORENSIC ENGINE
 # ==============================================================================
 def compute_cagr(recent_val: Optional[float], oldest_val: Optional[float], periods: int) -> Optional[float]:
-    """Calculates Compound Annual Growth Rate (%) when both endpoints are positive."""
     if (
         recent_val is None
         or oldest_val is None
@@ -270,17 +285,12 @@ def compute_cagr(recent_val: Optional[float], oldest_val: Optional[float], perio
 
 
 def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Computes ROE, ROCE, ROA, D/E, Current Ratio, EBITDA & Margins,
-    Recent vs Past Growth Comparison, and Share Buyback EPS Distortion.
-    """
     info = bundle["info"]
     inc = bundle["income_stmt"]
     bs = bundle["balance_sheet"]
     cf = bundle["cash_flow"]
     profile = bundle["profile"]
 
-    # Statement series extraction
     rev_s = get_statement_row(inc, ["Total Revenue", "Operating Revenue", "Revenue"])
     gp_s = get_statement_row(inc, ["Gross Profit"])
     ebitda_s = get_statement_row(inc, ["EBITDA", "Normalized EBITDA"])
@@ -301,6 +311,11 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         bs, ["Total Debt", "Long Term Debt And Capital Lease Obligation", "Long Term Debt"]
     )
 
+    fcf_s = get_statement_row(cf, ["Free Cash Flow"])
+    ocf_s = get_statement_row(
+        cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"]
+    )
+    capex_s = get_statement_row(cf, ["Capital Expenditure", "Capital Expenditures"])
     buyback_cf_s = get_statement_row(
         cf, ["Repurchase Of Capital Stock", "Common Stock Payments", "Net Common Stock Issuance"]
     )
@@ -342,7 +357,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
             roa = ni_0 / as_0
     roa_pct = roa * 100.0 if roa is not None else None
 
-    # 4. Debt-to-Equity & Current Ratio
+    # 4. Debt-to-Equity, Current Ratio, Price-to-Book
     raw_de = safe_float(info.get("debtToEquity"))
     de_ratio = (raw_de / 100.0) if (raw_de is not None and profile["de_applicable"]) else None
     if de_ratio is None and profile["de_applicable"] and debt_s is not None and equity_s is not None:
@@ -358,14 +373,22 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         if ca_0 is not None and cl_0 and cl_0 > 0:
             current_ratio = ca_0 / cl_0
 
-    # 5. Multi-Year Growth & Margin Comparison (Recent YoY vs Past 3-Year CAGR)
-    def extract_growth_profile(series: Optional[pd.Series], info_yoy_key: Optional[str] = None) -> Dict[str, Optional[float]]:
-        recent_yoy = None
-        past_cagr = None
-        latest_val = None
-        prev_val = None
-        oldest_val = None
+    pb_ratio = safe_float(info.get("priceToBook"))
+    pe_ratio = safe_float(info.get("trailingPE")) or safe_float(info.get("forwardPE"))
 
+    # Latest OCF, FCF & Net Income for Cash Conversion Check
+    latest_ni = safe_float(ni_s.dropna().iloc[0]) if (ni_s is not None and not ni_s.dropna().empty) else safe_float(info.get("netIncomeToCommon"))
+    latest_ocf = safe_float(ocf_s.dropna().iloc[0]) if (ocf_s is not None and not ocf_s.dropna().empty) else safe_float(info.get("operatingCashflow"))
+    latest_fcf = safe_float(fcf_s.dropna().iloc[0]) if (fcf_s is not None and not fcf_s.dropna().empty) else safe_float(info.get("freeCashflow"))
+    if latest_fcf is None and latest_ocf is not None and capex_s is not None and not capex_s.dropna().empty:
+        cx_0 = safe_float(capex_s.dropna().iloc[0], 0.0) or 0.0
+        latest_fcf = latest_ocf + cx_0 if cx_0 < 0 else latest_ocf - cx_0
+
+    ocf_to_ni_ratio = (latest_ocf / latest_ni) if (latest_ocf is not None and latest_ni and latest_ni > 0) else None
+
+    # 5. Multi-Year Growth & Margin Comparison
+    def extract_growth_profile(series: Optional[pd.Series], info_yoy_key: Optional[str] = None) -> Dict[str, Optional[float]]:
+        recent_yoy, past_cagr, latest_val, prev_val = None, None, None, None
         if series is not None and not series.dropna().empty:
             clean_s = series.dropna()
             latest_val = safe_float(clean_s.iloc[0])
@@ -385,12 +408,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
             if info_v is not None:
                 recent_yoy = info_v * 100.0
 
-        return {
-            "latest": latest_val,
-            "prev": prev_val,
-            "recent_yoy_pct": recent_yoy,
-            "past_cagr_pct": past_cagr,
-        }
+        return {"latest": latest_val, "prev": prev_val, "recent_yoy_pct": recent_yoy, "past_cagr_pct": past_cagr}
 
     rev_growth = extract_growth_profile(rev_s, "revenueGrowth")
     ebitda_growth = extract_growth_profile(ebitda_s) if profile["ebitda_applicable"] else {
@@ -399,13 +417,9 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     ni_growth = extract_growth_profile(ni_s, "earningsGrowth")
     eps_growth = extract_growth_profile(eps_s, "earningsGrowth")
 
-    # Margins: Current vs Past Historical Average
-    ebitda_margin_curr = None
-    ebitda_margin_past = None
-    net_margin_curr = None
-    net_margin_past = None
-    gross_margin_curr = None
-    gross_margin_past = None
+    ebitda_margin_curr, ebitda_margin_past = None, None
+    net_margin_curr, net_margin_past = None, None
+    gross_margin_curr, gross_margin_past = None, None
 
     if rev_s is not None and not rev_s.dropna().empty:
         cols = list(rev_s.dropna().index[:4])
@@ -430,10 +444,21 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
             net_margin_curr = nm_list[0]
             net_margin_past = float(np.mean(nm_list[1:])) if len(nm_list) > 1 else nm_list[0]
 
+    if gross_margin_curr is None:
+        gm_info = safe_float(info.get("grossMargins"))
+        if gm_info is not None:
+            gross_margin_curr = gm_info * 100.0
+    if ebitda_margin_curr is None and profile["ebitda_applicable"]:
+        em_info = safe_float(info.get("ebitdaMargins"))
+        if em_info is not None:
+            ebitda_margin_curr = em_info * 100.0
+    if net_margin_curr is None:
+        nm_info = safe_float(info.get("profitMargins"))
+        if nm_info is not None:
+            net_margin_curr = nm_info * 100.0
+
     # 6. Share Buyback & EPS Quality Detector
     share_change_pct = None
-    latest_shares = None
-    oldest_shares = None
     if shares_s is not None and len(shares_s.dropna()) >= 2:
         clean_sh = shares_s.dropna()
         latest_shares = safe_float(clean_sh.iloc[0])
@@ -441,21 +466,16 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         if latest_shares and oldest_shares and oldest_shares > 0:
             share_change_pct = ((latest_shares - oldest_shares) / oldest_shares) * 100.0
 
-    latest_buyback_cash = 0.0
     total_3yr_buyback_cash = 0.0
     if buyback_cf_s is not None and not buyback_cf_s.dropna().empty:
         clean_bb = buyback_cf_s.dropna()
-        # In yfinance cashflow, stock repurchases are negative cash outflows
         bb_vals = [abs(safe_float(v, 0.0) or 0.0) for v in clean_bb.iloc[:3] if (safe_float(v, 0.0) or 0.0) < 0]
         if bb_vals:
-            latest_buyback_cash = bb_vals[0]
             total_3yr_buyback_cash = float(np.sum(bb_vals))
 
     eps_cagr = eps_growth["past_cagr_pct"] or eps_growth["recent_yoy_pct"]
     ni_cagr = ni_growth["past_cagr_pct"] or ni_growth["recent_yoy_pct"]
-    eps_buyback_boost_pct = None
-    if eps_cagr is not None and ni_cagr is not None:
-        eps_buyback_boost_pct = eps_cagr - ni_cagr
+    eps_buyback_boost_pct = (eps_cagr - ni_cagr) if (eps_cagr is not None and ni_cagr is not None) else None
 
     buyback_detected = (
         (share_change_pct is not None and share_change_pct <= -1.0)
@@ -491,6 +511,12 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "roa_pct": roa_pct,
         "de_ratio": de_ratio,
         "current_ratio": current_ratio,
+        "pb_ratio": pb_ratio,
+        "pe_ratio": pe_ratio,
+        "latest_fcf": latest_fcf,
+        "latest_ocf": latest_ocf,
+        "latest_ni": latest_ni,
+        "ocf_to_ni_ratio": ocf_to_ni_ratio,
         "rev_growth": rev_growth,
         "ebitda_growth": ebitda_growth,
         "ni_growth": ni_growth,
@@ -502,7 +528,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "net_margin_curr": net_margin_curr,
         "net_margin_past": net_margin_past,
         "share_change_pct": share_change_pct,
-        "latest_buyback_cash": latest_buyback_cash,
         "total_3yr_buyback_cash": total_3yr_buyback_cash,
         "eps_buyback_boost_pct": eps_buyback_boost_pct,
         "buyback_detected": buyback_detected,
@@ -512,7 +537,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_three_year_history_table(bundle: Dict[str, Any]) -> pd.DataFrame:
-    """Builds a 3-year historical table with Revenue, EBITDA, Margins, EPS, Shares, and FCF."""
     inc = bundle["income_stmt"]
     cf = bundle["cash_flow"]
     currency = bundle["currency"]
@@ -575,28 +599,310 @@ def build_three_year_history_table(bundle: Dict[str, Any]) -> pd.DataFrame:
 
 
 # ==============================================================================
-# 3. LIVE INDUSTRY & PEER BENCHMARKING ENGINE
+# 3. SECTOR-SPECIFIC VALUE INVESTING CHECKLIST ENGINE (NEW)
+# ==============================================================================
+def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Dynamically generates a sector-specific quantitative & qualitative checklist
+    based on the company's industry archetype.
+    """
+    archetype = bundle["profile"]["archetype"]
+    currency = bundle["currency"]
+
+    roe = metrics.get("roe_pct")
+    roce = metrics.get("roce_pct")
+    roa = metrics.get("roa_pct")
+    de = metrics.get("de_ratio")
+    cr = metrics.get("current_ratio")
+    pb = metrics.get("pb_ratio")
+    gm = metrics.get("gross_margin_curr")
+    em = metrics.get("ebitda_margin_curr")
+    em_past = metrics.get("ebitda_margin_past")
+    nm = metrics.get("net_margin_curr")
+    fcf = metrics.get("latest_fcf")
+    ocf_ni = metrics.get("ocf_to_ni_ratio")
+    rev_yoy = metrics["rev_growth"]["recent_yoy_pct"]
+
+    def status_badge(passed: Optional[bool], borderline: bool = False) -> str:
+        if passed is None:
+            return "⚪ DATA N/A"
+        if passed:
+            return "✅ PASS"
+        if borderline:
+            return "⚠️ BORDERLINE"
+        return "❌ FAIL"
+
+    quant_checks = []
+    qual_questions = []
+    sector_title = ""
+    moat_focus = ""
+
+    if archetype == "MANUFACTURING_INDUSTRIAL":
+        sector_title = "🏭 Manufacturing, Auto & Heavy Industrials Checklist"
+        moat_focus = "Capital efficiency on physical plants (ROCE), debt discipline across cycles, and positive Free Cash Flow after CapEx."
+        quant_checks = [
+            {
+                "Parameter": "Return on Capital Employed (ROCE)",
+                "Target Benchmark": ">= 15.0% (Acceptable >= 12%)",
+                "Actual Value": f"{roce:.2f}%" if roce is not None else "N/A",
+                "Status": status_badge(roce >= 15.0 if roce is not None else None, borderline=(roce is not None and 11.5 <= roce < 15.0)),
+                "Why It Matters in This Sector": "Proves factories and machinery generate returns above the cost of capital.",
+            },
+            {
+                "Parameter": "Debt-to-Equity Ratio (D/E)",
+                "Target Benchmark": "<= 0.80x (Safe < 1.2x)",
+                "Actual Value": f"{de:.2f}x" if de is not None else "N/A",
+                "Status": status_badge(de <= 0.80 if de is not None else None, borderline=(de is not None and 0.80 < de <= 1.20)),
+                "Why It Matters in This Sector": "Prevents interest payments from wiping out profits during industrial downturns.",
+            },
+            {
+                "Parameter": "Free Cash Flow After CapEx",
+                "Target Benchmark": "Positive (> 0)",
+                "Actual Value": format_large_currency(fcf, currency),
+                "Status": status_badge(fcf > 0 if fcf is not None else None),
+                "Why It Matters in This Sector": "Checks if heavy plant CapEx leaves real cash for shareholders (explains low DCF vs Graham).",
+            },
+            {
+                "Parameter": "Operating EBITDA Margin Stability",
+                "Target Benchmark": ">= 12.0% & Stable vs 3-Yr Avg",
+                "Actual Value": f"{em:.2f}% (3Y Avg: {em_past:.1f}%)" if (em is not None and em_past is not None) else (f"{em:.2f}%" if em is not None else "N/A"),
+                "Status": status_badge(em >= 12.0 if em is not None else None, borderline=(em is not None and 8.0 <= em < 12.0)),
+                "Why It Matters in This Sector": "Demonstrates ability to pass raw material cost spikes on to customers.",
+            },
+        ]
+        qual_questions = [
+            "CapEx Reinvestment Check: Is recent plant/machinery CapEx expanding profitable capacity rather than just maintaining old equipment?",
+            "Working Capital Check: Are receivables and inventory growing slower than or in line with revenue growth?",
+            "Cyclicality Buffer: Can the company survive a 20% commodity/demand slowdown without raising new debt?",
+        ]
+
+    elif archetype == "BANKING_NBFC":
+        sector_title = "🏦 Banking, NBFCs & Financial Services Checklist"
+        moat_focus = "Asset quality (low NPAs), Return on Assets (ROA), compounding book value (ROE), and reasonable Price-to-Book multiple."
+        quant_checks = [
+            {
+                "Parameter": "Return on Assets (ROA)",
+                "Target Benchmark": ">= 1.20% (Elite >= 1.5%)",
+                "Actual Value": f"{roa:.2f}%" if roa is not None else "N/A",
+                "Status": status_badge(roa >= 1.20 if roa is not None else None, borderline=(roa is not None and 0.90 <= roa < 1.20)),
+                "Why It Matters in This Sector": "The single most important gauge of a lender's underwriting profitability.",
+            },
+            {
+                "Parameter": "Return on Equity (ROE)",
+                "Target Benchmark": ">= 14.0%",
+                "Actual Value": f"{roe:.2f}%" if roe is not None else "N/A",
+                "Status": status_badge(roe >= 14.0 if roe is not None else None, borderline=(roe is not None and 11.5 <= roe < 14.0)),
+                "Why It Matters in This Sector": "Measures how fast the bank compounds shareholder book value per share.",
+            },
+            {
+                "Parameter": "Price-to-Book Ratio (P/B)",
+                "Target Benchmark": "<= 3.0x (Value < 2.2x)",
+                "Actual Value": f"{pb:.2f}x" if pb is not None else "N/A",
+                "Status": status_badge(pb <= 3.0 if pb is not None else None, borderline=(pb is not None and 3.0 < pb <= 4.2)),
+                "Why It Matters in This Sector": "Banks are valued on tangible book value; overpaying for book erodes Margin of Safety.",
+            },
+            {
+                "Parameter": "Net Profit Margin",
+                "Target Benchmark": ">= 15.0%",
+                "Actual Value": f"{nm:.2f}%" if nm is not None else "N/A",
+                "Status": status_badge(nm >= 15.0 if nm is not None else None, borderline=(nm is not None and 10.0 <= nm < 15.0)),
+                "Why It Matters in This Sector": "Reflects Net Interest Margin (NIM) strength after credit provisions.",
+            },
+        ]
+        qual_questions = [
+            "Asset Quality (GNPA / NNPA): Are Gross and Net Non-Performing Assets stable or declining over the last 4 quarters?",
+            "Liability Franchise (CASA): Does the lender have low-cost sticky deposits (or AAA credit rating for NBFCs)?",
+            "Capital Adequacy (CRAR): Is Tier-1 Capital well above regulatory minimums so frequent equity dilution isn't needed?",
+        ]
+
+    elif archetype == "IT_TECH":
+        sector_title = "💻 Information Technology, Software & Platform Checklist"
+        moat_focus = "Asset-light scalability, high client switching costs, strong cash conversion (OCF/Net Income), and organic EPS growth."
+        quant_checks = [
+            {
+                "Parameter": "Return on Equity & ROCE",
+                "Target Benchmark": "ROE >= 20% & ROCE >= 20%",
+                "Actual Value": f"ROE: {roe:.1f}% | ROCE: {roce:.1f}%" if (roe is not None and roce is not None) else "N/A",
+                "Status": status_badge((roe or 0) >= 20.0 and (roce or 0) >= 20.0 if (roe is not None or roce is not None) else None, borderline=((roe or 0) >= 15.0)),
+                "Why It Matters in This Sector": "Asset-light tech leaders should generate exceptional returns on minimal physical capital.",
+            },
+            {
+                "Parameter": "Cash Conversion (Operating Cash Flow / Net Income)",
+                "Target Benchmark": ">= 0.85x (85%+ conversion)",
+                "Actual Value": f"{ocf_ni:.2f}x" if ocf_ni is not None else "N/A",
+                "Status": status_badge(ocf_ni >= 0.85 if ocf_ni is not None else None, borderline=(ocf_ni is not None and 0.70 <= ocf_ni < 0.85)),
+                "Why It Matters in This Sector": "Confirms software/IT accounting profits are turning into real collectible cash.",
+            },
+            {
+                "Parameter": "Balance Sheet Leverage (D/E)",
+                "Target Benchmark": "<= 0.40x (Near Zero Debt)",
+                "Actual Value": f"{de:.2f}x" if de is not None else "N/A",
+                "Status": status_badge(de <= 0.40 if de is not None else None, borderline=(de is not None and 0.40 < de <= 0.80)),
+                "Why It Matters in This Sector": "Quality tech compounders self-fund R&D from internal cash flows without needing debt.",
+            },
+            {
+                "Parameter": "Operating / EBITDA Margin",
+                "Target Benchmark": ">= 18.0%",
+                "Actual Value": f"{em:.2f}%" if em is not None else "N/A",
+                "Status": status_badge(em >= 18.0 if em is not None else None, borderline=(em is not None and 14.0 <= em < 18.0)),
+                "Why It Matters in This Sector": "Protects profitability against wage hikes and subcontractor inflation.",
+            },
+        ]
+        qual_questions = [
+            "Order Book & Deal Pipeline: Is Total Contract Value (TCV) or recurring subscription revenue growing steadily?",
+            "AI & Tech Obsolescence Moat: Are client switching costs high enough to prevent pricing compression?",
+            "Share Count Discipline: Are employee stock options (ESOPs) reasonable rather than diluting shareholders?",
+        ]
+
+    elif archetype == "FMCG_CONSUMER":
+        sector_title = "🛒 FMCG, Consumer Goods & Retail Brand Checklist"
+        moat_focus = "Brand pricing power (Gross Margin), distribution reach, negative/low working capital, and high ROCE."
+        quant_checks = [
+            {
+                "Parameter": "Gross Profit Margin (Brand Pricing Power)",
+                "Target Benchmark": ">= 40.0% (Strong Brand Moat)",
+                "Actual Value": f"{gm:.2f}%" if gm is not None else "N/A",
+                "Status": status_badge(gm >= 40.0 if gm is not None else None, borderline=(gm is not None and 30.0 <= gm < 40.0)),
+                "Why It Matters in This Sector": "High gross margins prove customers pay a premium for the brand over generic rivals.",
+            },
+            {
+                "Parameter": "Return on Capital Employed (ROCE)",
+                "Target Benchmark": ">= 22.0%",
+                "Actual Value": f"{roce:.2f}%" if roce is not None else "N/A",
+                "Status": status_badge(roce >= 22.0 if roce is not None else None, borderline=(roce is not None and 15.0 <= roce < 22.0)),
+                "Why It Matters in This Sector": "Hallmark of an enduring Buffett-style consumer monopoly.",
+            },
+            {
+                "Parameter": "Free Cash Flow Conversion (OCF / Net Income)",
+                "Target Benchmark": ">= 0.85x",
+                "Actual Value": f"{ocf_ni:.2f}x" if ocf_ni is not None else "N/A",
+                "Status": status_badge(ocf_ni >= 0.85 if ocf_ni is not None else None, borderline=(ocf_ni is not None and 0.70 <= ocf_ni < 0.85)),
+                "Why It Matters in This Sector": "Ensures inventory isn't piling up unsold at distributors.",
+            },
+            {
+                "Parameter": "Debt-to-Equity Ratio (D/E)",
+                "Target Benchmark": "<= 0.50x",
+                "Actual Value": f"{de:.2f}x" if de is not None else "N/A",
+                "Status": status_badge(de <= 0.50 if de is not None else None, borderline=(de is not None and 0.50 < de <= 0.90)),
+                "Why It Matters in This Sector": "Consumer staples should generate surplus cash and require minimal debt.",
+            },
+        ]
+        qual_questions = [
+            "Volume vs. Price Growth: Is revenue growing from real unit volume expansion, not just price hikes?",
+            "Market Share Defense: Is the flagship brand holding or gaining market share against D2C/private-label entrants?",
+            "Valuation Sanity Check: Even if the brand is elite, is the P/E multiple reasonable relative to its 10–12% growth rate?",
+        ]
+
+    elif archetype == "PHARMA_HEALTH":
+        sector_title = "💊 Pharmaceuticals, Healthcare & Diagnostics Checklist"
+        moat_focus = "R&D pipeline productivity, high gross margins, regulatory compliance (USFDA/domestic), and healthy working capital."
+        quant_checks = [
+            {
+                "Parameter": "Gross Profit Margin",
+                "Target Benchmark": ">= 50.0% (Specialty/Formulations)",
+                "Actual Value": f"{gm:.2f}%" if gm is not None else "N/A",
+                "Status": status_badge(gm >= 50.0 if gm is not None else None, borderline=(gm is not None and 38.0 <= gm < 50.0)),
+                "Why It Matters in This Sector": "Provides the buffer needed to fund continuous R&D and clinical/ANDA filings.",
+            },
+            {
+                "Parameter": "Return on Capital Employed (ROCE)",
+                "Target Benchmark": ">= 15.0%",
+                "Actual Value": f"{roce:.2f}%" if roce is not None else "N/A",
+                "Status": status_badge(roce >= 15.0 if roce is not None else None, borderline=(roce is not None and 11.5 <= roce < 15.0)),
+                "Why It Matters in This Sector": "Validates that manufacturing plants and R&D spend earn strong returns.",
+            },
+            {
+                "Parameter": "Current Ratio (Working Capital Liquidity)",
+                "Target Benchmark": ">= 1.50x",
+                "Actual Value": f"{cr:.2f}x" if cr is not None else "N/A",
+                "Status": status_badge(cr >= 1.50 if cr is not None else None, borderline=(cr is not None and 1.15 <= cr < 1.50)),
+                "Why It Matters in This Sector": "Pharma companies carry longer inventory & receivable cycles.",
+            },
+            {
+                "Parameter": "Debt-to-Equity Ratio (D/E)",
+                "Target Benchmark": "<= 0.60x",
+                "Actual Value": f"{de:.2f}x" if de is not None else "N/A",
+                "Status": status_badge(de <= 0.60 if de is not None else None, borderline=(de is not None and 0.60 < de <= 1.0)),
+                "Why It Matters in This Sector": "Avoids debt distress if a plant faces regulatory/FDA import delays.",
+            },
+        ]
+        qual_questions = [
+            "Regulatory / FDA Cleanliness: Are manufacturing facilities free from unresolved FDA Warning Letters or import alerts?",
+            "Product Concentration Check: Is revenue diversified across therapies rather than reliant on a single windfall product/tender?",
+            "R&D & Patent Cliff: Is the complex generics / domestic branded pipeline strong enough to offset pricing erosion?",
+        ]
+
+    else:  # ENERGY_UTILITIES
+        sector_title = "⚡ Energy, Oil & Gas, Power & Utilities Checklist"
+        moat_focus = "Low production cost, regulated/contracted cash flows, manageable debt-to-capital, and sustainable dividend/FCF yield."
+        quant_checks = [
+            {
+                "Parameter": "Return on Capital Employed (ROCE)",
+                "Target Benchmark": ">= 12.0%",
+                "Actual Value": f"{roce:.2f}%" if roce is not None else "N/A",
+                "Status": status_badge(roce >= 12.0 if roce is not None else None, borderline=(roce is not None and 9.0 <= roce < 12.0)),
+                "Why It Matters in This Sector": "Capital-heavy utilities and energy assets must clear their cost of capital.",
+            },
+            {
+                "Parameter": "EBITDA Margin",
+                "Target Benchmark": ">= 18.0%",
+                "Actual Value": f"{em:.2f}%" if em is not None else "N/A",
+                "Status": status_badge(em >= 18.0 if em is not None else None, borderline=(em is not None and 12.0 <= em < 18.0)),
+                "Why It Matters in This Sector": "Indicates operating cushion against fuel and commodity price swings.",
+            },
+            {
+                "Parameter": "Debt-to-Equity Ratio (D/E)",
+                "Target Benchmark": "<= 1.20x (Infrastructure Standard)",
+                "Actual Value": f"{de:.2f}x" if de is not None else "N/A",
+                "Status": status_badge(de <= 1.20 if de is not None else None, borderline=(de is not None and 1.20 < de <= 1.80)),
+                "Why It Matters in This Sector": "Utilities use project debt, but excessive leverage threatens dividend safety.",
+            },
+            {
+                "Parameter": "Operating Cash Flow Generation",
+                "Target Benchmark": "Positive (> 0)",
+                "Actual Value": format_large_currency(metrics.get("latest_ocf"), currency),
+                "Status": status_badge((metrics.get("latest_ocf") or 0) > 0 if metrics.get("latest_ocf") is not None else None),
+                "Why It Matters in This Sector": "Funds ongoing grid/refinery CapEx and shareholder dividends.",
+            },
+        ]
+        qual_questions = [
+            "Cycle Peak Check: Are current earnings reflecting normal mid-cycle refining/energy margins rather than a temporary commodity spike?",
+            "Receivables from Discoms/Offtakers: Are payments from state utilities or industrial buyers collected on time?",
+            "Energy Transition CapEx: Is green/new-energy CapEx earning clear visibility on returns?",
+        ]
+
+    pass_count = sum(1 for item in quant_checks if item["Status"] == "✅ PASS")
+    borderline_count = sum(1 for item in quant_checks if item["Status"] == "⚠️ BORDERLINE")
+    total_checks = len(quant_checks)
+
+    return {
+        "sector_title": sector_title,
+        "moat_focus": moat_focus,
+        "quant_checks": quant_checks,
+        "qual_questions": qual_questions,
+        "pass_count": pass_count,
+        "borderline_count": borderline_count,
+        "total_checks": total_checks,
+    }
+
+
+# ==============================================================================
+# 4. LIVE INDUSTRY & PEER BENCHMARKING ENGINE
 # ==============================================================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_industry_peer_benchmarks(
     target_ticker: str, sector: str, currency: str, custom_peers_str: str = ""
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[float]]]:
-    """
-    Fetches live metrics for 3-4 industry peers in the same market and computes
-    the Industry Peer Median across Revenue Growth, EBITDA Margin, Net Margin, ROE, ROCE, and P/E.
-    """
     is_india = currency == "INR" or target_ticker.endswith((".NS", ".BO"))
     peer_map = INDIA_SECTOR_PEERS if is_india else US_SECTOR_PEERS
-    default_peers = peer_map.get(sector, ["TCS.NS", "INFY.NS", "ITC.NS", "LT.NS"] if is_india else ["AAPL", "MSFT", "GOOG", "JNJ"])
+    default_peers = peer_map.get(
+        sector,
+        ["TCS.NS", "INFY.NS", "ITC.NS", "LT.NS"] if is_india else ["AAPL", "MSFT", "GOOG", "JNJ"],
+    )
 
     if custom_peers_str.strip():
         raw_list = [p.strip().upper() for p in custom_peers_str.split(",") if p.strip()]
-        peer_tickers = []
-        for p in raw_list:
-            if is_india and "." not in p:
-                peer_tickers.append(f"{p}.NS")
-            else:
-                peer_tickers.append(p)
+        peer_tickers = [f"{p}.NS" if (is_india and "." not in p) else p for p in raw_list]
     else:
         peer_tickers = [p for p in default_peers if p != target_ticker][:4]
 
@@ -614,7 +920,6 @@ def fetch_industry_peer_benchmarks(
             roe_v = safe_float(p_info.get("returnOnEquity"))
             pe_v = safe_float(p_info.get("trailingPE")) or safe_float(p_info.get("forwardPE"))
 
-            # Calculate peer ROCE from statements
             roce_v = None
             ebit_s = get_statement_row(p_inc, ["EBIT", "Operating Income"])
             ass_s = get_statement_row(p_bs, ["Total Assets"])
@@ -663,7 +968,7 @@ def fetch_industry_peer_benchmarks(
 
 
 # ==============================================================================
-# 4. AUTOMATED 2-STAGE DCF & BENJAMIN GRAHAM SCENARIO ENGINE
+# 5. AUTOMATED 2-STAGE DCF & BENJAMIN GRAHAM SCENARIO ENGINE
 # ==============================================================================
 def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
     info = bundle["info"]
@@ -723,7 +1028,6 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         debt_s = get_statement_row(bs, ["Total Debt", "Long Term Debt"])
         total_debt = safe_float(debt_s.dropna().iloc[0]) if (debt_s is not None and not debt_s.dropna().empty) else 0.0
 
-    # For financial institutions, debt is operational funding; do not subtract raw bank debt in equity bridge
     if bundle["profile"]["is_financial"]:
         total_cash = 0.0
         total_debt = 0.0
@@ -867,7 +1171,7 @@ def build_three_scenarios(
 
 
 # ==============================================================================
-# 5. CORPORATE NEWS FILTERING & VADER SENTIMENT ENGINE
+# 6. CORPORATE NEWS FILTERING & VADER SENTIMENT ENGINE
 # ==============================================================================
 NOISE_PATTERNS = [
     r"\bmidday movers\b", r"\bstock market today\b", r"\btop gainers\b",
@@ -944,7 +1248,7 @@ def analyze_corporate_news(raw_news: List[Dict[str, Any]], max_items: int = 7) -
 
 
 # ==============================================================================
-# 6. INDUSTRY-ADAPTIVE DECISION ENGINE (70% FUNDAMENTALS / 30% SENTIMENT)
+# 7. INDUSTRY-ADAPTIVE DECISION ENGINE (WITH CHECKLIST CONFIRMATION)
 # ==============================================================================
 def compute_decision_verdict(
     ticker: str,
@@ -955,15 +1259,9 @@ def compute_decision_verdict(
     peer_medians: Dict[str, Optional[float]],
     scenarios: Dict[str, Dict[str, Optional[float]]],
     news_summary: Dict[str, Any],
+    checklist_result: Dict[str, Any],
+    user_confirmed_count: int,
 ) -> Dict[str, Any]:
-    """
-    70% Weight on Financial Health, Industry Comparison, Growth Quality & Valuation (70 pts):
-      - Blended Margin of Safety (DCF + Graham): up to 25 pts
-      - Capital Efficiency (ROE + ROCE if non-financial, or ROE + ROA if financial): up to 20 pts
-      - Growth & Margin Momentum + EPS Organic Quality: up to 15 pts
-      - Balance Sheet Safety & Industry Peer Outperformance: up to 10 pts
-    30% Weight on Long-Term Corporate News Sentiment (30 pts).
-    """
     base_case = scenarios["Base Case"]
     cons_case = scenarios["Conservative"]
     mos = base_case.get("blended_mos_pct")
@@ -991,54 +1289,46 @@ def compute_decision_verdict(
     if profile["roce_applicable"]:
         roce_pts = min(10.0, max(0.0, ((roce or 0.0) / 20.0) * 10.0)) if roce is not None else 5.0
     else:
-        # For Banks/NBFCs, reward ROA >= 1.5% for full 10 pts
         roce_pts = min(10.0, max(0.0, ((roa or 0.0) / 1.5) * 10.0)) if roa is not None else 5.0
     efficiency_pts = roe_pts + roce_pts
 
     # 3. Growth Acceleration, Margin Expansion & Buyback Quality (0 - 15 pts)
     rev_yoy = metrics["rev_growth"]["recent_yoy_pct"]
     rev_cagr = metrics["rev_growth"]["past_cagr_pct"]
-    growth_pts = 5.0
+    growth_pts = 4.0
     if rev_yoy is not None and rev_yoy > 8.0:
-        growth_pts += 3.0
+        growth_pts += 2.5
     if rev_yoy is not None and rev_cagr is not None and rev_yoy >= rev_cagr:
-        growth_pts += 2.0  # Accelerating revenue growth
+        growth_pts += 2.0
 
     nm_curr = metrics.get("net_margin_curr")
     nm_past = metrics.get("net_margin_past")
     if nm_curr is not None and nm_past is not None and nm_curr >= nm_past:
-        growth_pts += 2.5  # Expanding profit margins
+        growth_pts += 2.0
 
-    # Reward organic EPS growth; slightly discount heavy buyback distortion or dilution
     if metrics["buyback_verdict"] == "100% ORGANIC EPS GROWTH":
-        growth_pts += 2.5
+        growth_pts += 2.0
     elif metrics["buyback_verdict"] == "BUYBACK-BOOSTED EPS":
-        growth_pts += 1.5
+        growth_pts += 1.0
+
+    # Add up to 2.5 pts for interactive qualitative checklist confirmation
+    growth_pts += min(2.5, user_confirmed_count * (2.5 / 3.0))
     growth_pts = min(15.0, growth_pts)
 
-    # 4. Balance Sheet & Industry Peer Comparison (0 - 10 pts)
-    bs_peer_pts = 0.0
-    if profile["de_applicable"]:
-        if de is None:
-            bs_peer_pts += 2.5
-        elif de <= 0.5:
-            bs_peer_pts += 5.0
-        elif de <= 1.5:
-            bs_peer_pts += 2.5
-    else:
-        bs_peer_pts += 4.0  # Financial baseline
+    # 4. Sector Checklist Pass Rate & Industry Peer Comparison (0 - 10 pts)
+    quant_pass_ratio = checklist_result["pass_count"] / max(1, checklist_result["total_checks"])
+    bs_peer_pts = quant_pass_ratio * 6.0
 
-    # Industry outperformance check (ROE & Margin vs Peer Median)
     roe_med = peer_medians.get("roe_med")
     nm_med = peer_medians.get("net_margin_med")
     if roe is not None and roe_med is not None and roe >= roe_med:
-        bs_peer_pts += 2.5
+        bs_peer_pts += 2.0
     else:
-        bs_peer_pts += 1.0
+        bs_peer_pts += 0.5
     if nm_curr is not None and nm_med is not None and nm_curr >= nm_med:
-        bs_peer_pts += 2.5
+        bs_peer_pts += 2.0
     else:
-        bs_peer_pts += 1.0
+        bs_peer_pts += 0.5
     bs_peer_pts = min(10.0, bs_peer_pts)
 
     fundamental_score_70 = mos_pts + efficiency_pts + growth_pts + bs_peer_pts
@@ -1050,14 +1340,14 @@ def compute_decision_verdict(
 
     total_score = float(np.clip(fundamental_score_70 + sentiment_score_30, 0.0, 100.0))
 
-    if total_score >= 75.0 and (mos is not None and mos >= 15.0):
+    if total_score >= 75.0 and (mos is not None and mos >= 15.0) and checklist_result["pass_count"] >= 3:
         verdict, badge_color = "STRONG BUY", "#16a34a"
-    elif total_score >= 60.0:
+    elif total_score >= 60.0 and (mos is not None and mos >= 0.0):
         verdict, badge_color = "ACCUMULATE", "#2563eb"
     elif total_score >= 45.0:
         verdict, badge_color = "HOLD", "#d97706"
     else:
-        verdict, badge_color = "OVERVALUED", "#dc2626"
+        verdict, badge_color = "OVERVALUED / AVOID", "#dc2626"
 
     roe_str = f"{roe:.1f}%" if roe is not None else "N/A"
     roce_str = f", ROCE of {roce:.1f}%," if (profile["roce_applicable"] and roce is not None) else ""
@@ -1066,8 +1356,9 @@ def compute_decision_verdict(
     mos_str = f"{mos:+.1f}%" if mos is not None else "indeterminate"
 
     sentence_1 = (
-        f"{company_name} ({ticker}) operates with a trailing ROE of {roe_str}{roce_str} and "
-        f"{metrics['buyback_verdict'].lower()} across the recent 3-year cycle."
+        f"{company_name} ({ticker}) passes {checklist_result['pass_count']}/{checklist_result['total_checks']} "
+        f"automated sector checklist benchmarks with a trailing ROE of {roe_str}{roce_str} and "
+        f"{metrics['buyback_verdict'].lower()}."
     )
     sentence_2 = (
         f"Blending the 2-Stage DCF and Benjamin Graham models yields a Base-Case Intrinsic Value of {base_iv_str} "
@@ -1076,18 +1367,22 @@ def compute_decision_verdict(
     )
 
     risk_factors = []
+    if checklist_result["pass_count"] <= 2:
+        risk_factors.append(
+            f"failing {checklist_result['total_checks'] - checklist_result['pass_count']} mandatory sector checklist thresholds"
+        )
     if rev_yoy is not None and rev_cagr is not None and rev_yoy < rev_cagr - 3.0:
-        risk_factors.append("recent top-line revenue deceleration relative to its 3-year historical CAGR")
+        risk_factors.append("recent top-line revenue deceleration relative to its 3-year CAGR")
     if metrics["buyback_verdict"] == "BUYBACK-BOOSTED EPS":
-        risk_factors.append("EPS growth partially flattered by share buybacks rather than pure net profit expansion")
+        risk_factors.append("EPS growth partially flattered by share buybacks")
     if cons_mos is not None and cons_mos < -15.0:
-        risk_factors.append("downside sensitivity if growth slows toward the Conservative scenario")
+        risk_factors.append("downside vulnerability if growth slows toward the Conservative scenario")
     if mos is not None and mos < 0:
         risk_factors.append("multiple compression from trading above Base-Case intrinsic value")
     if not risk_factors:
-        risk_factors.append("macroeconomic demand cyclicality and sector multiple normalization")
+        risk_factors.append("macroeconomic demand cyclicality and terminal multiple normalization")
 
-    sentence_3 = f"Core long-term risk factors to monitor include {', '.join(risk_factors)}."
+    sentence_3 = f"Core long-term risk factors to monitor before allocating capital include {', '.join(risk_factors)}."
 
     return {
         "fundamental_score_70": fundamental_score_70,
@@ -1100,7 +1395,7 @@ def compute_decision_verdict(
 
 
 # ==============================================================================
-# 7. STREAMLIT USER INTERFACE
+# 8. STREAMLIT USER INTERFACE
 # ==============================================================================
 def main() -> None:
     with st.sidebar:
@@ -1126,7 +1421,7 @@ def main() -> None:
         raw_ticker_input = st.text_input(
             "Or Enter Any Stock Ticker",
             value=default_ticker,
-            help="Type any ticker (e.g., TCS, HDFCBANK, MARUTI, AAPL, GOOG). In India mode, .NS is appended automatically if omitted.",
+            help="Type any ticker (e.g., TCS, HDFCBANK, BMW, CUPID, AAPL). In India mode, .NS or .BO is appended automatically if omitted.",
         )
 
         exchange_suffix = ".NS"
@@ -1149,15 +1444,11 @@ def main() -> None:
             "Override Sector Peer Tickers (comma-separated)",
             value="",
             placeholder="e.g., INFY.NS, HCLTECH.NS, WIPRO.NS",
-            help="Leave blank to automatically benchmark against top sector peers.",
         )
 
         st.markdown("---")
         st.subheader("📐 Valuation & DCF Overrides")
-        use_custom_params = st.checkbox(
-            "Override Automatic Growth & WACC Assumptions",
-            value=False,
-        )
+        use_custom_params = st.checkbox("Override Automatic Growth & WACC Assumptions", value=False)
         custom_g1 = st.slider(
             "Base Stage-1 Growth Rate g₁ (Years 1–5, %)",
             min_value=0.0, max_value=25.0, value=11.0 if is_india else 8.5, step=0.5,
@@ -1184,16 +1475,17 @@ def main() -> None:
 
     target_ticker = st.session_state["active_ticker"]
 
-    st.title("🏛️ Buffett Institutional Value, ROCE & Forensic Analyzer")
+    st.title("🏛️ Buffett Institutional Value, ROCE & Sector Checklist Analyzer")
     st.markdown(
-        "**Industry-Adaptive Screening** • **Current vs. Past Growth & Margin Momentum** • "
-        "**Buyback EPS Forensics** • **Live Sector Peer Benchmarks** • **3-Scenario 2-Stage DCF**"
+        "**Dynamic Sector Checklist** • **ROE & ROCE Moat** • **Current vs. Past Growth Momentum** • "
+        "**Buyback Forensics** • **3-Scenario 2-Stage DCF**"
     )
 
-    with st.spinner(f"Running institutional statements, buyback forensics, and peer benchmarks for {target_ticker}..."):
+    with st.spinner(f"Running statements, sector checklist, buyback forensics, and peer benchmarks for {target_ticker}..."):
         try:
             bundle = fetch_company_bundle(target_ticker)
             metrics = extract_comprehensive_metrics(bundle)
+            checklist_result = evaluate_sector_checklist(bundle, metrics)
             df_peers, peer_medians = fetch_industry_peer_benchmarks(
                 target_ticker=target_ticker,
                 sector=bundle["sector"],
@@ -1216,7 +1508,7 @@ def main() -> None:
 
     st.subheader(f"{company_name} (`{target_ticker}`)")
     st.caption(
-        f"**Industry Profile:** {profile['profile_name']} | **Sector:** {bundle['sector']} | "
+        f"**Industry Profile:** {profile['profile_name']} | **Sector:** {bundle['sector']} ({bundle['industry']}) | "
         f"**Market Price:** {format_price(current_price, currency)} ({currency}) | "
         f"**Market Cap:** {format_large_currency(mcap, currency)}"
     )
@@ -1268,7 +1560,7 @@ def main() -> None:
                 delta_color="normal" if (de_v is not None and de_v <= 0.8) else "inverse",
             )
         else:
-            pb_v = safe_float(info.get("priceToBook"))
+            pb_v = metrics["pb_ratio"]
             st.metric(
                 label="Price-to-Book (P/B)",
                 value=f"{pb_v:.2f}x" if pb_v is not None else "N/A",
@@ -1292,11 +1584,50 @@ def main() -> None:
     st.divider()
 
     # --------------------------------------------------------------------------
-    # SECTION 2: CURRENT VS. PAST GROWTH, MARGINS, BUYBACK CHECK & INDUSTRY PEERS
+    # SECTION 2: DYNAMIC SECTOR-SPECIFIC VALUE INVESTING CHECKLIST (NEW)
     # --------------------------------------------------------------------------
-    st.header("2. Growth Acceleration, EBITDA/Profit Margins, Buyback Forensics & Industry Comparison")
+    st.header("2. Dynamic Sector-Specific Value Investing Checklist")
+    st.markdown(
+        f"**Detected Sector Framework:** `{checklist_result['sector_title']}`  \n"
+        f"**Primary Sector Moat Drivers:** *{checklist_result['moat_focus']}*"
+    )
 
-    # 2A. Buyback & EPS Quality Alert Box
+    chk_col1, chk_col2 = st.columns([2, 1])
+    with chk_col1:
+        st.markdown("#### 🤖 Automated Quantitative Sector Rules")
+        df_chk = pd.DataFrame(checklist_result["quant_checks"]).set_index("Parameter")
+        st.dataframe(df_chk, use_container_width=True)
+
+    with chk_col2:
+        st.markdown("#### ☑️ Qualitative Moat Reconfirmation")
+        st.caption(
+            "Check off each sector-specific qualitative rule below after verifying it to add up to +2.5 bonus conviction points to the Final Score:"
+        )
+        user_confirmed_count = 0
+        for idx, q_text in enumerate(checklist_result["qual_questions"]):
+            if st.checkbox(q_text, key=f"qual_{target_ticker}_{idx}", value=False):
+                user_confirmed_count += 1
+
+        pass_c = checklist_result["pass_count"]
+        tot_c = checklist_result["total_checks"]
+        badge_bg = "#16a34a" if pass_c >= 3 else ("#d97706" if pass_c == 2 else "#dc2626")
+        st.markdown(
+            f"""
+            <div style="background-color: #1e293b; border-left: 6px solid {badge_bg}; padding: 12px 14px; border-radius: 6px; margin-top: 10px;">
+                <strong style="color: #f8fafc;">Automated Sector Pass Rate: <span style="color: {badge_bg};">{pass_c} / {tot_c} Passed</span></strong><br>
+                <span style="color: #cbd5e1; font-size: 0.88rem;">Qualitative Investor Checks Confirmed: {user_confirmed_count} / {len(checklist_result['qual_questions'])}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------------------------
+    # SECTION 3: CURRENT VS. PAST GROWTH, MARGINS, BUYBACK CHECK & INDUSTRY PEERS
+    # --------------------------------------------------------------------------
+    st.header("3. Growth Acceleration, EBITDA/Profit Margins, Buyback Forensics & Industry Comparison")
+
     bb_verdict = metrics["buyback_verdict"]
     bb_color = "#16a34a" if bb_verdict == "100% ORGANIC EPS GROWTH" else ("#d97706" if bb_verdict == "BUYBACK-BOOSTED EPS" else "#dc2626")
     st.markdown(
@@ -1309,7 +1640,6 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # 2B. Current vs Past Growth & Margin Comparison Table (with Industry Benchmark)
     def fmt_pct(val: Optional[float]) -> str:
         return f"{val:+.2f}%" if val is not None else "N/A"
 
@@ -1422,9 +1752,9 @@ def main() -> None:
     st.divider()
 
     # --------------------------------------------------------------------------
-    # SECTION 3: 2-STAGE DCF & BENJAMIN GRAHAM 3-SCENARIO VALUATION
+    # SECTION 4: 2-STAGE DCF & BENJAMIN GRAHAM 3-SCENARIO VALUATION
     # --------------------------------------------------------------------------
-    st.header("3. Intrinsic Value & 3-Scenario DCF / Graham Calculator")
+    st.header("4. Intrinsic Value & 3-Scenario DCF / Graham Calculator")
 
     dcf_inputs = extract_dcf_inputs(bundle, metrics)
     applied_g1 = custom_g1 if use_custom_params else dcf_inputs["base_g1_pct"]
@@ -1485,9 +1815,9 @@ def main() -> None:
     st.divider()
 
     # --------------------------------------------------------------------------
-    # SECTION 4: CORPORATE NEWS SENTIMENT & FINAL VERDICT
+    # SECTION 5: CORPORATE NEWS SENTIMENT & FINAL VERDICT
     # --------------------------------------------------------------------------
-    st.header("4. Long-Term News Sentiment & Final Investment Verdict")
+    st.header("5. Long-Term News Sentiment & Final Investment Verdict")
     news_summary = analyze_corporate_news(bundle["raw_news"], max_items=7)
 
     if news_summary["selected_count"] > 0:
@@ -1508,11 +1838,13 @@ def main() -> None:
         peer_medians=peer_medians,
         scenarios=scenarios,
         news_summary=news_summary,
+        checklist_result=checklist_result,
+        user_confirmed_count=user_confirmed_count,
     )
 
     dc1, dc2, dc3 = st.columns(3)
     with dc1:
-        st.metric("Fundamentals, ROCE, Peers & Valuation (70%)", f"{decision['fundamental_score_70']:.1f} / 70.0")
+        st.metric("Fundamentals, Sector Checklist & Valuation (70%)", f"{decision['fundamental_score_70']:.1f} / 70.0")
     with dc2:
         st.metric("Corporate Catalyst Sentiment (30%)", f"{decision['sentiment_score_30']:.1f} / 30.0")
     with dc3:
