@@ -2590,7 +2590,7 @@ def main() -> None:
 
         em_momentum = f"🟢 Expanding ({em_curr - em_past:+.2f}%)" if (profile["ebitda_applicable"] and em_curr is not None and em_past is not None and em_curr >= em_past) else "N/A"
         nm_momentum = f"🟢 Expanding ({nm_curr - nm_past:+.2f}%)" if (nm_curr is not None and nm_past is not None and nm_curr >= nm_past) else "N/A"
-)
+
         # Unpack P/E, sector P/E, and PEG variables from pe_peg_analysis
         t_pe_v = pe_peg_analysis["trailing_pe"]
         h_pe_v = pe_peg_analysis["hist_pe"]
