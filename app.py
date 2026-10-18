@@ -50,7 +50,6 @@ INDIA_SECTOR_PEERS = {
     "MANUFACTURING_INDUSTRIAL": ["LT.NS", "MARUTI.NS", "EICHERMOT.NS", "SIEMENS.NS"],
 }
 
-# Verified NSE Institutional Sector Medians (Fallback so Section 3 is NEVER N/A)
 NSE_SECTOR_BENCHMARKS = {
     "IT_TECH": {
         "rev_growth_med": 9.5,
@@ -224,7 +223,7 @@ def classify_industry_profile(sector: str, industry: str, ticker: str = "") -> D
         "de_applicable": True,
         "applicable_note": (
             "Operating Company Detected: Multi-source engine (Screener.in + Yahoo Finance) active across "
-            "ROCE, ROE, EBITDA Margin, Debt-to-Equity, Free Cash Flow conversion, and Buyback EPS Forensics."
+            "ROCE, ROE, Quarterly QoQ/YoY Turnaround Scanner, EBITDA Margin, FCF, and Buyback Forensics."
         ),
     }
 
@@ -235,8 +234,9 @@ def classify_industry_profile(sector: str, industry: str, ticker: str = "") -> D
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
     """
-    Scrapes verified Indian fundamentals from Screener.in (Consolidated first, Standalone fallback)
-    to fill missing ROCE, ROE, 3-Year Revenue/Profit/OPM/EPS/FCF rows when Yahoo Finance has gaps.
+    Scrapes verified Indian fundamentals from Screener.in (Consolidated first, Standalone fallback),
+    including Top Ratios, Quarterly Results (#quarters), Annual P&L (#profit-loss),
+    Balance Sheet (#balance-sheet), and Cash Flows (#cash-flow).
     """
     base_sym = clean_symbol.split(".")[0].strip().upper()
     headers = {
@@ -249,6 +249,7 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "available": False,
         "ratios": {},
+        "quarters_df": pd.DataFrame(),
         "pnl_df": pd.DataFrame(),
         "cf_df": pd.DataFrame(),
         "bs_df": pd.DataFrame(),
@@ -264,10 +265,11 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
         try:
             resp = requests.get(url, headers=headers, timeout=8)
             if resp.status_code == 200 and "top-ratios" in resp.text:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                # Check if consolidated table actually has data rows
-                pnl_sec = soup.find("section", id="profit-loss")
-                if pnl_sec and len(pnl_sec.find_all("tr")) >= 3:
+                cand_soup = BeautifulSoup(resp.text, "html.parser")
+                pnl_sec = cand_soup.find("section", id="profit-loss")
+                qtr_sec = cand_soup.find("section", id="quarters")
+                if (pnl_sec and len(pnl_sec.find_all("tr")) >= 3) or (qtr_sec and len(qtr_sec.find_all("tr")) >= 3):
+                    soup = cand_soup
                     break
         except Exception:
             continue
@@ -275,7 +277,6 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
     if soup is None:
         return result
 
-    # 1. Extract Top Ratios (Market Cap, Current Price, Stock P/E, Book Value, ROCE, ROE)
     ratios: Dict[str, Optional[float]] = {}
     top_ul = soup.find("ul", id="top-ratios")
     if top_ul:
@@ -323,15 +324,29 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
 
         if not rows_dict:
             return pd.DataFrame()
-        df_out = pd.DataFrame.from_dict(rows_dict, orient="index", columns=headers_list[1:])
+        # Handle duplicate column names if any
+        cols_clean = []
+        seen_c: Dict[str, int] = {}
+        for c in headers_list[1:]:
+            c_str = c if c else "Period"
+            if c_str in seen_c:
+                seen_c[c_str] += 1
+                cols_clean.append(f"{c_str}_{seen_c[c_str]}")
+            else:
+                seen_c[c_str] = 0
+                cols_clean.append(c_str)
+
+        df_out = pd.DataFrame.from_dict(rows_dict, orient="index", columns=cols_clean)
         return df_out
 
+    quarters_df = parse_screener_table("quarters")
     pnl_df = parse_screener_table("profit-loss")
     bs_df = parse_screener_table("balance-sheet")
     cf_df = parse_screener_table("cash-flow")
 
-    result["available"] = bool(ratios or not pnl_df.empty)
+    result["available"] = bool(ratios or not pnl_df.empty or not quarters_df.empty)
     result["ratios"] = ratios
+    result["quarters_df"] = quarters_df
     result["pnl_df"] = pnl_df
     result["bs_df"] = bs_df
     result["cf_df"] = cf_df
@@ -362,7 +377,6 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Also fetch Screener.in data in parallel for Indian multi-source verification
     screener_data = fetch_screener_india_data(ticker_clean)
     scr_ratios = screener_data.get("ratios", {})
 
@@ -383,7 +397,6 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
             current_price = None
 
     if current_price is None:
-        # Try switching .NS <-> .BO automatically if user typed a BSE-only stock like BMW
         alt_ticker = ticker_clean.replace(".NS", ".BO") if ticker_clean.endswith(".NS") else ticker_clean.replace(".BO", ".NS")
         try:
             alt_obj = yf.Ticker(alt_ticker)
@@ -408,6 +421,13 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
             income_stmt = ticker_obj.income_stmt
     except Exception:
         income_stmt = pd.DataFrame()
+
+    try:
+        quarterly_stmt = ticker_obj.quarterly_financials
+        if quarterly_stmt is None or quarterly_stmt.empty:
+            quarterly_stmt = ticker_obj.quarterly_income_stmt
+    except Exception:
+        quarterly_stmt = pd.DataFrame()
 
     try:
         balance_sheet = ticker_obj.balance_sheet
@@ -442,6 +462,7 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
         "profile": profile,
         "current_price": current_price,
         "income_stmt": income_stmt,
+        "quarterly_stmt": quarterly_stmt,
         "balance_sheet": balance_sheet,
         "cash_flow": cash_flow,
         "raw_news": raw_news,
@@ -449,7 +470,255 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
 
 
 # ==============================================================================
-# 3. HYBRID METRICS ENGINE (MERGING YFINANCE + SCREENER.IN)
+# 3. QUARTERLY RESULTS TREND & TURNAROUND SCANNER (LAST 4 QUARTERS QoQ / YoY)
+# ==============================================================================
+def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Builds a Last 4 Quarters performance table with QoQ (%) and YoY (%) growth/margin
+    deltas from Screener.in (#quarters) or Yahoo Finance quarterly_financials fallback,
+    and detects early quarterly turnarounds before annual reports are released.
+    """
+    scr_qtr = bundle.get("screener", {}).get("quarters_df", pd.DataFrame())
+    yf_qtr = bundle.get("quarterly_stmt", pd.DataFrame())
+    profile = bundle["profile"]
+
+    q_cols: List[str] = []
+    sales_list: List[Optional[float]] = []
+    op_profit_list: List[Optional[float]] = []
+    opm_list: List[Optional[float]] = []
+    net_profit_list: List[Optional[float]] = []
+    eps_list: List[Optional[float]] = []
+    source_used = "Screener.in Quarterly Filings (₹ Cr)"
+
+    # 1. Primary Source: Screener.in #quarters table (ordered oldest -> newest left to right)
+    if scr_qtr is not None and not scr_qtr.empty and len(scr_qtr.columns) >= 4:
+        # Take up to last 5 quarters so index -1 is Latest Quarter, -2 is Prev Quarter (QoQ), -5 is YoY Quarter
+        num_q = min(5, len(scr_qtr.columns))
+        recent_cols = list(scr_qtr.columns[-num_q:])
+        q_cols = recent_cols
+
+        sales_row = get_statement_row(scr_qtr, ["Sales", "Revenue", "Interest", "Financing Profit"])
+        op_row = get_statement_row(scr_qtr, ["Operating Profit", "Financing Profit", "EBIT"])
+        opm_row = get_statement_row(scr_qtr, ["OPM %", "OPM", "Financing Margin %"])
+        np_row = get_statement_row(scr_qtr, ["Net Profit"])
+        eps_row = get_statement_row(scr_qtr, ["EPS in Rs", "EPS"])
+
+        for c in recent_cols:
+            s_v = safe_float(sales_row.get(c)) if sales_row is not None else None
+            op_v = safe_float(op_row.get(c)) if op_row is not None else None
+            opm_v = safe_float(opm_row.get(c)) if opm_row is not None else None
+            if opm_v is None and s_v and s_v > 0 and op_v is not None:
+                opm_v = (op_v / s_v) * 100.0
+            np_v = safe_float(np_row.get(c)) if np_row is not None else None
+            ep_v = safe_float(eps_row.get(c)) if eps_row is not None else None
+
+            sales_list.append(s_v)
+            op_profit_list.append(op_v)
+            opm_list.append(opm_v)
+            net_profit_list.append(np_v)
+            eps_list.append(ep_v)
+
+    # 2. Fallback Source: Yahoo Finance quarterly_financials (ordered newest -> oldest left to right)
+    elif yf_qtr is not None and not yf_qtr.empty and len(yf_qtr.columns) >= 2:
+        source_used = "Yahoo Finance Quarterly Filings (₹ Cr)"
+        num_q = min(5, len(yf_qtr.columns))
+        # Reverse so chronological order is oldest -> newest (matching Screener convention)
+        raw_cols = list(yf_qtr.columns[:num_q])[::-1]
+        q_cols = [c.strftime("%b %Y") if hasattr(c, "strftime") else str(c)[:7] for c in raw_cols]
+
+        rev_s = get_statement_row(yf_qtr, ["Total Revenue", "Operating Revenue", "Revenue", "Interest Income"])
+        ebitda_s = get_statement_row(yf_qtr, ["EBITDA", "Normalized EBITDA", "Operating Income", "EBIT"])
+        ni_s = get_statement_row(
+            yf_qtr, ["Net Income", "Net Income Common Stockholders", "Net Income Continuous Operations"]
+        )
+        eps_s = get_statement_row(yf_qtr, ["Diluted EPS", "Basic EPS"])
+
+        for c in raw_cols:
+            r_raw = safe_float(rev_s.get(c)) if rev_s is not None else None
+            eb_raw = safe_float(ebitda_s.get(c)) if ebitda_s is not None else None
+            ni_raw = safe_float(ni_s.get(c)) if ni_s is not None else None
+            ep_v = safe_float(eps_s.get(c)) if eps_s is not None else None
+
+            s_cr = (r_raw / 1e7) if r_raw is not None else None
+            op_cr = (eb_raw / 1e7) if eb_raw is not None else None
+            np_cr = (ni_raw / 1e7) if ni_raw is not None else None
+            opm_v = (op_cr / s_cr * 100.0) if (op_cr is not None and s_cr and s_cr > 0) else None
+
+            sales_list.append(s_cr)
+            op_profit_list.append(op_cr)
+            opm_list.append(opm_v)
+            net_profit_list.append(np_cr)
+            eps_list.append(ep_v)
+
+    if len(q_cols) < 2:
+        return {
+            "available": False,
+            "df_quarterly": pd.DataFrame(),
+            "turnaround_status": "DATA UNAVAILABLE",
+            "turnaround_badge_color": "#64748b",
+            "turnaround_summary": "Quarterly breakdown was not returned by the data feed for this symbol.",
+            "score_bonus": 0.0,
+            "qoq_sales_pct": None,
+            "yoy_sales_pct": None,
+            "qoq_np_pct": None,
+            "yoy_np_pct": None,
+        }
+
+    def calc_pct_change(curr: Optional[float], prev: Optional[float]) -> Optional[float]:
+        if curr is None or prev is None or prev == 0:
+            return None
+        return ((curr - prev) / abs(prev)) * 100.0
+
+    # Compute QoQ (latest vs previous quarter) and YoY (latest vs 4 quarters ago if 5 cols exist)
+    has_yoy = len(q_cols) >= 5
+    qoq_sales = calc_pct_change(sales_list[-1], sales_list[-2])
+    yoy_sales = calc_pct_change(sales_list[-1], sales_list[0]) if has_yoy else None
+
+    qoq_op = calc_pct_change(op_profit_list[-1], op_profit_list[-2])
+    yoy_op = calc_pct_change(op_profit_list[-1], op_profit_list[0]) if has_yoy else None
+
+    qoq_opm_bps = (opm_list[-1] - opm_list[-2]) if (opm_list[-1] is not None and opm_list[-2] is not None) else None
+    yoy_opm_bps = (opm_list[-1] - opm_list[0]) if (has_yoy and opm_list[-1] is not None and opm_list[0] is not None) else None
+
+    qoq_np = calc_pct_change(net_profit_list[-1], net_profit_list[-2])
+    yoy_np = calc_pct_change(net_profit_list[-1], net_profit_list[0]) if has_yoy else None
+
+    qoq_eps = calc_pct_change(eps_list[-1], eps_list[-2])
+    yoy_eps = calc_pct_change(eps_list[-1], eps_list[0]) if has_yoy else None
+
+    # Display the last 4 quarters columns cleanly
+    disp_cols = q_cols[-4:]
+    idx_offset = len(q_cols) - len(disp_cols)
+
+    def fmt_cr_cell(v: Optional[float]) -> str:
+        return f"₹{v:,.2f} Cr" if v is not None else "N/A"
+
+    def fmt_pct_cell(v: Optional[float]) -> str:
+        return f"{v:+.2f}%" if v is not None else "N/A"
+
+    table_rows = []
+    # Row 1: Revenue / Sales
+    r_sales: Dict[str, Any] = {"Quarterly Metric": "Revenue / Sales (₹ Cr)"}
+    for i, col_name in enumerate(disp_cols):
+        r_sales[col_name] = fmt_cr_cell(sales_list[idx_offset + i])
+    r_sales["QoQ Change (%)"] = fmt_pct_cell(qoq_sales)
+    r_sales["YoY Change (%)"] = fmt_pct_cell(yoy_sales) if has_yoy else "Requires 5th Qtr"
+    table_rows.append(r_sales)
+
+    # Row 2: Operating Profit / EBITDA
+    op_label = "Financing Profit (₹ Cr)" if profile["is_financial"] else "Operating Profit / EBITDA (₹ Cr)"
+    r_op: Dict[str, Any] = {"Quarterly Metric": op_label}
+    for i, col_name in enumerate(disp_cols):
+        r_op[col_name] = fmt_cr_cell(op_profit_list[idx_offset + i])
+    r_op["QoQ Change (%)"] = fmt_pct_cell(qoq_op)
+    r_op["YoY Change (%)"] = fmt_pct_cell(yoy_op) if has_yoy else "—"
+    table_rows.append(r_op)
+
+    # Row 3: Operating Profit Margin (OPM %)
+    m_label = "Financing Margin (%)" if profile["is_financial"] else "Operating Profit Margin (OPM %)"
+    r_opm: Dict[str, Any] = {"Quarterly Metric": m_label}
+    for i, col_name in enumerate(disp_cols):
+        v_m = opm_list[idx_offset + i]
+        r_opm[col_name] = f"{v_m:.2f}%" if v_m is not None else "N/A"
+    r_opm["QoQ Change (%)"] = f"{qoq_opm_bps:+.2f}% pts" if qoq_opm_bps is not None else "N/A"
+    r_opm["YoY Change (%)"] = f"{yoy_opm_bps:+.2f}% pts" if yoy_opm_bps is not None else "—"
+    table_rows.append(r_opm)
+
+    # Row 4: Net Profit (₹ Cr)
+    r_np: Dict[str, Any] = {"Quarterly Metric": "Net Profit (₹ Cr)"}
+    for i, col_name in enumerate(disp_cols):
+        r_np[col_name] = fmt_cr_cell(net_profit_list[idx_offset + i])
+    r_np["QoQ Change (%)"] = fmt_pct_cell(qoq_np)
+    r_np["YoY Change (%)"] = fmt_pct_cell(yoy_np) if has_yoy else "—"
+    table_rows.append(r_np)
+
+    # Row 5: Diluted EPS (₹)
+    r_eps: Dict[str, Any] = {"Quarterly Metric": "Quarterly EPS (₹)"}
+    for i, col_name in enumerate(disp_cols):
+        v_e = eps_list[idx_offset + i]
+        r_eps[col_name] = format_inr_price(v_e)
+    r_eps["QoQ Change (%)"] = fmt_pct_cell(qoq_eps)
+    r_eps["YoY Change (%)"] = fmt_pct_cell(yoy_eps) if has_yoy else "—"
+    table_rows.append(r_eps)
+
+    df_qtr_display = pd.DataFrame(table_rows).set_index("Quarterly Metric")
+
+    # Turnaround & Quarterly Momentum Classification
+    np_latest = net_profit_list[-1]
+    np_prev = net_profit_list[-2]
+    np_yoy_base = net_profit_list[0] if has_yoy else None
+
+    loss_to_profit = (
+        np_latest is not None
+        and np_latest > 0
+        and ((np_prev is not None and np_prev <= 0) or (np_yoy_base is not None and np_yoy_base <= 0))
+    )
+    strong_expansion = (
+        (qoq_sales is not None and qoq_sales > 3.0)
+        and (qoq_np is not None and qoq_np > 8.0)
+        and (qoq_opm_bps is None or qoq_opm_bps >= -0.5)
+    )
+    yoy_breakout = (
+        (yoy_sales is not None and yoy_sales >= 12.0)
+        and (yoy_np is not None and yoy_np >= 15.0)
+    )
+
+    if loss_to_profit:
+        t_status = "🚀 QUARTERLY LOSS-TO-PROFIT TURNAROUND DETECTED"
+        t_color = "#16a34a"
+        t_summary = (
+            f"Latest quarter ({disp_cols[-1]}) swung to a positive Net Profit of ₹{np_latest:,.2f} Cr "
+            f"from a prior loss, signaling an early operational inflection before full annual statements reflect it."
+        )
+        score_bonus = 2.5
+    elif strong_expansion or yoy_breakout:
+        t_status = "🟢 STRONG QUARTERLY EARNINGS & MARGIN MOMENTUM"
+        t_color = "#16a34a"
+        s_qoq_str = f"{qoq_sales:+.1f}% QoQ" if qoq_sales is not None else ""
+        s_yoy_str = f" / {yoy_sales:+.1f}% YoY" if yoy_sales is not None else ""
+        np_qoq_str = f"{qoq_np:+.1f}% QoQ" if qoq_np is not None else ""
+        np_yoy_str = f" / {yoy_np:+.1f}% YoY" if yoy_np is not None else ""
+        t_summary = (
+            f"In {disp_cols[-1]}, Revenue grew {s_qoq_str}{s_yoy_str} while Net Profit expanded "
+            f"{np_qoq_str}{np_yoy_str}, confirming healthy near-term execution."
+        )
+        score_bonus = 2.0
+    elif (qoq_np is not None and qoq_np < -12.0) or (yoy_np is not None and yoy_np < -15.0):
+        t_status = "🔴 QUARTERLY EARNINGS CONTRACTION / MARGIN PRESSURE"
+        t_color = "#dc2626"
+        np_qoq_str = f"{qoq_np:+.1f}% QoQ" if qoq_np is not None else "N/A"
+        np_yoy_str = f"{yoy_np:+.1f}% YoY" if yoy_np is not None else "N/A"
+        t_summary = (
+            f"Latest quarter ({disp_cols[-1]}) experienced earnings pressure (Net Profit: {np_qoq_str}, {np_yoy_str}). "
+            f"Monitor upcoming quarterly filings for margin stabilization."
+        )
+        score_bonus = -1.5
+    else:
+        t_status = "⚖️ STEADY / MIXED QUARTERLY RUN-RATE"
+        t_color = "#2563eb"
+        t_summary = (
+            f"Latest quarter ({disp_cols[-1]}) shows steady operational run-rate without sharp quarterly distortion."
+        )
+        score_bonus = 0.5
+
+    return {
+        "available": True,
+        "source_used": source_used,
+        "latest_quarter_label": disp_cols[-1],
+        "df_quarterly": df_qtr_display,
+        "turnaround_status": t_status,
+        "turnaround_badge_color": t_color,
+        "turnaround_summary": t_summary,
+        "score_bonus": score_bonus,
+        "qoq_sales_pct": qoq_sales,
+        "yoy_sales_pct": yoy_sales,
+        "qoq_np_pct": qoq_np,
+        "yoy_np_pct": yoy_np,
+    }
+
+
+# ==============================================================================
+# 4. HYBRID METRICS ENGINE (MERGING YFINANCE + SCREENER.IN)
 # ==============================================================================
 def compute_cagr(recent_val: Optional[float], oldest_val: Optional[float], periods: int) -> Optional[float]:
     if (
@@ -464,10 +733,6 @@ def compute_cagr(recent_val: Optional[float], oldest_val: Optional[float], perio
 
 
 def get_screener_series_recent_first(df: pd.DataFrame, row_candidates: List[str], scale_mult: float = 1.0) -> Optional[pd.Series]:
-    """
-    Screener.in tables are ordered oldest-to-newest (left-to-right, e.g., Mar 2018 ... Mar 2025, TTM).
-    This helper extracts the matching row, reverses it to newest-first, and scales Crores to raw INR if requested.
-    """
     if df is None or df.empty:
         return None
     norm_idx = {str(idx).strip().lower(): idx for idx in df.index}
@@ -487,7 +752,6 @@ def get_screener_series_recent_first(df: pd.DataFrame, row_candidates: List[str]
     if matched_row is None:
         return None
 
-    # Drop empty columns and reverse so index 0 is the most recent year/TTM
     s_clean = matched_row.dropna()
     if s_clean.empty:
         return None
@@ -507,7 +771,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     scr_bs = scr.get("bs_df", pd.DataFrame())
     scr_cf = scr.get("cf_df", pd.DataFrame())
 
-    # --- 1. Extract Series from Yahoo Finance (with Screener.in Fallback in ₹) ---
     rev_s = get_statement_row(inc, ["Total Revenue", "Operating Revenue", "Revenue", "Interest Income"])
     if rev_s is None or len(rev_s.dropna()) < 2:
         rev_s = get_screener_series_recent_first(scr_pnl, ["Sales", "Revenue", "Financing Profit"], scale_mult=1e7)
@@ -565,7 +828,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         cf, ["Repurchase Of Capital Stock", "Common Stock Payments", "Net Common Stock Issuance"]
     )
 
-    # --- 2. ROE (%) & ROCE (%) ---
     roe_pct = scr_ratios.get("roe_pct")
     if roe_pct is None:
         roe_yf = safe_float(info.get("returnOnEquity"))
@@ -599,7 +861,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     if roce_prev_pct is None and roce_pct is not None:
         roce_prev_pct = roce_pct * 0.94
 
-    # --- 3. ROA (%), D/E, Current Ratio, P/B, P/E ---
     roa_yf = safe_float(info.get("returnOnAssets"))
     roa_pct = roa_yf * 100.0 if roa_yf is not None else None
     if roa_pct is None and ni_s is not None and assets_s is not None:
@@ -629,7 +890,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     pe_ratio = safe_float(info.get("trailingPE")) or scr_ratios.get("pe") or safe_float(info.get("forwardPE"))
 
-    # --- 4. Latest OCF, FCF & Net Income ---
     latest_ni = safe_float(ni_s.dropna().iloc[0]) if (ni_s is not None and not ni_s.dropna().empty) else safe_float(info.get("netIncomeToCommon"))
     latest_ocf = safe_float(ocf_s.dropna().iloc[0]) if (ocf_s is not None and not ocf_s.dropna().empty) else safe_float(info.get("operatingCashflow"))
     latest_fcf = safe_float(fcf_s.dropna().iloc[0]) if (fcf_s is not None and not fcf_s.dropna().empty) else safe_float(info.get("freeCashflow"))
@@ -639,7 +899,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     ocf_to_ni_ratio = (latest_ocf / latest_ni) if (latest_ocf is not None and latest_ni and latest_ni > 0) else None
 
-    # --- 5. Multi-Year Growth Comparison (Current YoY vs Past 3-Yr CAGR) ---
     def extract_growth_profile(series: Optional[pd.Series], info_yoy_key: Optional[str] = None) -> Dict[str, Optional[float]]:
         recent_yoy, past_cagr, latest_val, prev_val = None, None, None, None
         if series is not None and not series.dropna().empty:
@@ -672,7 +931,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     ni_growth = extract_growth_profile(ni_s, "earningsGrowth")
     eps_growth = extract_growth_profile(eps_s, "earningsGrowth")
 
-    # --- 6. EBITDA & Net Profit Margin Trajectory ---
     ebitda_margin_curr, ebitda_margin_past = None, None
     net_margin_curr, net_margin_past = None, None
     gross_margin_curr, gross_margin_past = None, None
@@ -700,7 +958,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
             net_margin_curr = nm_list[0]
             net_margin_past = float(np.mean(nm_list[1:])) if len(nm_list) > 1 else nm_list[0]
 
-    # Screener OPM% fallback for EBITDA margin
     if ebitda_margin_curr is None and profile["ebitda_applicable"]:
         opm_s = get_screener_series_recent_first(scr_pnl, ["OPM %", "OPM"], scale_mult=1.0)
         if opm_s is not None and not opm_s.empty:
@@ -722,7 +979,6 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
             net_margin_curr = nm_info * 100.0
             net_margin_past = net_margin_curr
 
-    # --- 7. Share Buyback & EPS Quality Detector ---
     share_change_pct = None
     latest_stmt_shares = None
     if shares_s is not None and not shares_s.dropna().empty:
@@ -807,20 +1063,15 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "buyback_detected": buyback_detected,
         "buyback_verdict": buyback_verdict,
         "buyback_explanation": buyback_explanation,
-        "rev_series": rev_s,
-        "ebitda_series": ebitda_s,
-        "ni_series": ni_s,
-        "eps_series": eps_s,
     }
 
 
-def build_three_year_history_table(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> pd.DataFrame:
+def build_three_year_history_table(bundle: Dict[str, Any]) -> pd.DataFrame:
     inc = bundle["income_stmt"]
     cf = bundle["cash_flow"]
     profile = bundle["profile"]
     scr_pnl = bundle.get("screener", {}).get("pnl_df", pd.DataFrame())
 
-    # If Yahoo Finance has at least 2 annual columns, use it; otherwise use Screener.in P&L table
     if inc is not None and not inc.empty and len(inc.columns) >= 2:
         cols = list(inc.columns[:3])
         rev_s = get_statement_row(inc, ["Total Revenue", "Operating Revenue", "Revenue", "Interest Income"])
@@ -870,7 +1121,6 @@ def build_three_year_history_table(bundle: Dict[str, Any], metrics: Dict[str, An
             )
         return pd.DataFrame(records).set_index("Fiscal Year")
 
-    # Fallback: Build 3-Year Table directly from Screener.in P&L
     if not scr_pnl.empty:
         rev_s = get_screener_series_recent_first(scr_pnl, ["Sales", "Revenue"], scale_mult=1e7)
         ebitda_s = get_screener_series_recent_first(scr_pnl, ["Operating Profit"], scale_mult=1e7)
@@ -903,7 +1153,7 @@ def build_three_year_history_table(bundle: Dict[str, Any], metrics: Dict[str, An
 
 
 # ==============================================================================
-# 4. SECTOR-SPECIFIC VALUE INVESTING CHECKLIST ENGINE
+# 5. SECTOR-SPECIFIC VALUE INVESTING CHECKLIST ENGINE
 # ==============================================================================
 def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
     archetype = bundle["profile"]["archetype"]
@@ -1181,16 +1431,12 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
 
 
 # ==============================================================================
-# 5. HYBRID INDUSTRY PEER BENCHMARKING (LIVE + NSE FALLBACK SO NEVER N/A)
+# 6. HYBRID INDUSTRY PEER BENCHMARKING (LIVE + NSE FALLBACK SO NEVER N/A)
 # ==============================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_industry_peer_benchmarks(
     target_ticker: str, archetype: str, custom_peers_str: str = ""
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[float]]]:
-    """
-    Combines live peer data from Yahoo/Screener with verified NSE Sector Medians
-    so Section 3 Industry Benchmarks NEVER show N/A even if Yahoo throttles requests.
-    """
     fallback_meds = NSE_SECTOR_BENCHMARKS.get(
         archetype, NSE_SECTOR_BENCHMARKS["MANUFACTURING_INDUSTRIAL"]
     ).copy()
@@ -1253,11 +1499,10 @@ def fetch_industry_peer_benchmarks(
 
 
 # ==============================================================================
-# 6. 2-STAGE DCF, GRAHAM & EXPECTED YEARS TO INTRINSIC VALUE ENGINE
+# 7. 2-STAGE DCF, GRAHAM & EXPECTED YEARS TO INTRINSIC VALUE ENGINE
 # ==============================================================================
 def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
     info = bundle["info"]
-    inc = bundle["income_stmt"]
     bs = bundle["balance_sheet"]
     cf = bundle["cash_flow"]
     current_price = bundle["current_price"]
@@ -1347,7 +1592,6 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
     beta = safe_float(info.get("beta"), default=1.0) or 1.0
     beta_clamped = float(np.clip(beta, 0.65, 1.65))
 
-    # India Macro Regime: 6.8% 10Y G-Sec Risk-Free Rate, 5.0% ERP, 4.0% Terminal Growth
     rf_rate, erp, base_terminal_g_pct = 6.8, 5.0, 4.0
     base_discount_pct = float(np.clip(rf_rate + beta_clamped * erp, 9.5, 15.0))
 
@@ -1371,15 +1615,6 @@ def estimate_years_to_target(
     annual_growth_pct: float,
     discount_rate_pct: float,
 ) -> Tuple[Optional[float], str]:
-    """
-    Calculates tentative years required for the stock/fundamentals to bridge the gap
-    between Current Market Price and Target Intrinsic Value:
-      - If Undervalued (Target IV > Current Price): Models price compounding at expected
-        fundamental return + multiple re-rating rate: r_conv = max(10%, 0.65*g1 + 0.5*r).
-      - If Overvalued (Target IV < Current Price): Models how many years of fundamental
-        earnings/cash-flow compounding at rate g1 are required for intrinsic value to
-        catch up to today's market price: T = ln(Price / Target_IV) / ln(1 + g1).
-    """
     if target_iv is None or target_iv <= 0 or current_price <= 0:
         return None, "N/A (Insufficient valuation data)"
 
@@ -1388,7 +1623,6 @@ def estimate_years_to_target(
         return 0.5, "Already trading within ±5% of Fair Intrinsic Value (~0 to 6 months)"
 
     if target_iv > current_price:
-        # Stock is undervalued; price converges upward via earnings growth + multiple expansion
         comp_rate = max(0.11, (annual_growth_pct * 0.65 + discount_rate_pct * 0.50) / 100.0)
         years = math.log(target_iv / current_price) / math.log(1.0 + comp_rate)
         years_clamped = float(np.clip(years, 0.5, 12.0))
@@ -1399,7 +1633,6 @@ def estimate_years_to_target(
             f"~{low_y} to {high_y} Years (Target Upside Re-Rating at ~{comp_rate * 100:.1f}%/yr)",
         )
     else:
-        # Stock is trading above intrinsic value; calculate years for earnings to grow into current price
         g_rate = max(0.08, annual_growth_pct / 100.0)
         years_catchup = math.log(current_price / target_iv) / math.log(1.0 + g_rate)
         years_clamped = float(np.clip(years_catchup, 0.5, 15.0))
@@ -1515,7 +1748,7 @@ def build_three_scenarios(
 
 
 # ==============================================================================
-# 7. CORPORATE NEWS SENTIMENT & SEPARATED POSITIVES / RISKS DECISION ENGINE
+# 8. CORPORATE NEWS SENTIMENT & SEPARATED POSITIVES / RISKS DECISION ENGINE
 # ==============================================================================
 NOISE_PATTERNS = [
     r"\bmidday movers\b", r"\bstock market today\b", r"\btop gainers\b",
@@ -1596,6 +1829,7 @@ def compute_decision_verdict(
     current_price: float,
     profile: Dict[str, Any],
     metrics: Dict[str, Any],
+    qtr_analysis: Dict[str, Any],
     peer_medians: Dict[str, Optional[float]],
     scenarios: Dict[str, Dict[str, Any]],
     news_summary: Dict[str, Any],
@@ -1607,7 +1841,6 @@ def compute_decision_verdict(
     opt_case = scenarios["Optimistic"]
 
     mos = base_case.get("blended_mos_pct")
-    cons_mos = cons_case.get("blended_mos_pct")
     dcf_iv = base_case.get("dcf_intrinsic")
     graham_iv = base_case.get("graham_intrinsic")
     blended_iv = base_case.get("blended_intrinsic")
@@ -1637,27 +1870,29 @@ def compute_decision_verdict(
         roce_pts = min(10.0, max(0.0, ((roa or 0.0) / 1.5) * 10.0)) if roa is not None else 5.0
     efficiency_pts = roe_pts + roce_pts
 
-    # 3. Growth Acceleration, Margin Expansion & Buyback Quality (0 - 15 pts)
+    # 3. Growth Acceleration, Quarterly Turnaround, Margin Expansion & Buyback Quality (0 - 15 pts)
     rev_yoy = metrics["rev_growth"]["recent_yoy_pct"]
     rev_cagr = metrics["rev_growth"]["past_cagr_pct"]
-    growth_pts = 4.0
+    growth_pts = 3.5
     if rev_yoy is not None and rev_yoy > 8.0:
-        growth_pts += 2.5
-    if rev_yoy is not None and rev_cagr is not None and rev_yoy >= rev_cagr:
         growth_pts += 2.0
+    if rev_yoy is not None and rev_cagr is not None and rev_yoy >= rev_cagr:
+        growth_pts += 1.5
 
     nm_curr = metrics.get("net_margin_curr")
     nm_past = metrics.get("net_margin_past")
     if nm_curr is not None and nm_past is not None and nm_curr >= nm_past:
-        growth_pts += 2.0
+        growth_pts += 1.5
 
     if metrics["buyback_verdict"] == "100% ORGANIC EPS GROWTH":
-        growth_pts += 2.0
+        growth_pts += 1.5
     elif metrics["buyback_verdict"] == "BUYBACK-BOOSTED EPS":
-        growth_pts += 1.0
+        growth_pts += 0.8
 
+    # Include Quarterly Turnaround / Momentum bonus (-1.5 to +2.5 pts)
+    growth_pts += float(qtr_analysis.get("score_bonus", 0.0))
     growth_pts += min(2.5, user_confirmed_count * (2.5 / 3.0))
-    growth_pts = min(15.0, growth_pts)
+    growth_pts = float(np.clip(growth_pts, 0.0, 15.0))
 
     # 4. Sector Checklist Pass Rate & Industry Peer Comparison (0 - 10 pts)
     quant_pass_ratio = checklist_result["pass_count"] / max(1, checklist_result["total_checks"])
@@ -1675,7 +1910,7 @@ def compute_decision_verdict(
         bs_peer_pts += 0.5
     bs_peer_pts = min(10.0, bs_peer_pts)
 
-    fundamental_score_70 = mos_pts + efficiency_pts + growth_pts + bs_peer_pts
+    fundamental_score_70 = float(np.clip(mos_pts + efficiency_pts + growth_pts + bs_peer_pts, 0.0, 70.0))
 
     # 5. Sentiment Sub-Score (0 - 30 pts)
     avg_comp = news_summary.get("avg_compound", 0.0)
@@ -1693,11 +1928,18 @@ def compute_decision_verdict(
     else:
         verdict, badge_color = "OVERVALUED / AVOID", "#dc2626"
 
-    # --- BUILD SEPARATE POSITIVE POINTS & RISK FACTORS LISTS ---
     positive_points: List[str] = []
     risk_points: List[str] = []
 
-    # Capital Efficiency Positives / Risks
+    # Quarterly Turnaround Bullet
+    if qtr_analysis.get("available"):
+        q_stat = qtr_analysis["turnaround_status"]
+        q_sum = qtr_analysis["turnaround_summary"]
+        if "TURNAROUND" in q_stat or "STRONG" in q_stat:
+            positive_points.append(f"**Quarterly Momentum ({q_stat}):** {q_sum}")
+        elif "CONTRACTION" in q_stat:
+            risk_points.append(f"**Quarterly Earnings Drag ({q_stat}):** {q_sum}")
+
     if roe is not None and roe >= 15.0:
         positive_points.append(
             f"**Strong Shareholder Compounding (ROE: {roe:.1f}%):** Clears Warren Buffett's 15% ROE moat hurdle (Sector Median: {roe_med or 15.0:.1f}%)."
@@ -1714,10 +1956,9 @@ def compute_decision_verdict(
             )
         else:
             risk_points.append(
-                f"**Low Return on Capital Employed (ROCE: {roce:.1f}%):** Heavy capital deployed in plants/working capital is earning below the 15% target."
+                f"**Low Return on Capital Employed (ROCE: {roce:.1f}%):** Capital deployed in plants/working capital is earning below the 15% target."
             )
 
-    # Balance Sheet Debt Positives / Risks
     if profile["de_applicable"]:
         if de is None or de <= 0.5:
             positive_points.append(
@@ -1728,18 +1969,16 @@ def compute_decision_verdict(
                 f"**Elevated Balance Sheet Leverage (D/E: {de:.2f}x):** High debt obligations increase vulnerability during industry slowdowns."
             )
 
-    # Growth & Margin Momentum Positives / Risks
     if rev_yoy is not None and rev_cagr is not None:
         if rev_yoy >= rev_cagr:
             positive_points.append(
-                f"**Accelerating Top-Line Momentum:** Recent YoY revenue growth ({rev_yoy:+.1f}%) is outpacing its 3-year historical CAGR ({rev_cagr:+.1f}%)."
+                f"**Accelerating Annual Top-Line Momentum:** Recent annual revenue growth ({rev_yoy:+.1f}%) is outpacing its 3-year CAGR ({rev_cagr:+.1f}%)."
             )
         else:
             risk_points.append(
-                f"**Top-Line Growth Deceleration:** Recent YoY revenue growth ({rev_yoy:+.1f}%) has slowed below its 3-year historical CAGR ({rev_cagr:+.1f}%)."
+                f"**Annual Top-Line Deceleration:** Recent annual revenue growth ({rev_yoy:+.1f}%) has slowed below its 3-year CAGR ({rev_cagr:+.1f}%)."
             )
 
-    # Valuation & DCF vs Graham Divergence Positives / Risks
     if mos is not None and mos >= 15.0:
         positive_points.append(
             f"**Attractive Margin of Safety ({mos:+.1f}%):** Market price ({format_inr_price(current_price)}) trades at a meaningful discount to Blended Intrinsic Value ({format_inr_price(blended_iv)})."
@@ -1754,7 +1993,6 @@ def compute_decision_verdict(
             f"**DCF vs. Graham Cash-Conversion Gap:** Graham Value ({format_inr_price(graham_iv)}) is much higher than 2-Stage DCF ({format_inr_price(dcf_iv)}), indicating heavy CapEx or working capital is absorbing Free Cash Flow."
         )
 
-    # EPS Quality & Checklist
     if metrics["buyback_verdict"] == "100% ORGANIC EPS GROWTH":
         positive_points.append(
             "**High-Quality Organic EPS:** Per-share earnings growth is backed by genuine Net Profit expansion rather than financial engineering."
@@ -1771,11 +2009,6 @@ def compute_decision_verdict(
             f"**Sector Checklist Weaknesses:** Passed only {checklist_result['pass_count']} of {checklist_result['total_checks']} mandatory quantitative sector rules."
         )
 
-    if not positive_points:
-        positive_points.append("**Established Market Presence:** Active operations with ongoing institutional coverage.")
-    if not risk_points:
-        risk_points.append("**Macro & Terminal Multiple Risk:** Standard sensitivity to domestic GDP growth and sector P/E multiple normalization.")
-
     return {
         "fundamental_score_70": fundamental_score_70,
         "sentiment_score_30": sentiment_score_30,
@@ -1791,7 +2024,7 @@ def compute_decision_verdict(
 
 
 # ==============================================================================
-# 8. STREAMLIT USER INTERFACE (100% INDIAN EQUITY MARKET EDITION)
+# 9. STREAMLIT USER INTERFACE (100% INDIAN EQUITY MARKET EDITION)
 # ==============================================================================
 def main() -> None:
     with st.sidebar:
@@ -1850,9 +2083,8 @@ def main() -> None:
             placeholder="e.g., INFY.NS, HCLTECH.NS, WIPRO.NS",
         )
         uploaded_csv = st.file_uploader(
-            "Optional: Upload Custom 3-Yr Financials CSV",
+            "Optional: Upload Custom Financials CSV",
             type=["csv"],
-            help="If you have a custom P&L CSV exported from Screener/Trendlyne, upload it here to display alongside live data.",
         )
 
         analyze_clicked = st.button("🔍 Analyze Indian Equity", type="primary", use_container_width=True)
@@ -1868,16 +2100,17 @@ def main() -> None:
 
     target_ticker = st.session_state["active_ticker"]
 
-    st.title("🇮🇳 Indian Market Institutional Value, ROCE & DCF Analyzer")
+    st.title("🇮🇳 Indian Market Institutional Value, Quarterly Turnaround & DCF Analyzer")
     st.markdown(
         "**Multi-Source Engine (`Screener.in` + `Yahoo Finance` + `NSE Sector Medians`)** • "
-        "**3-Scenario 2-Stage DCF** • **Separated Positives, Risks & Expected Years to Fair Value**"
+        "**Last 4 Quarters QoQ/YoY Turnaround Scanner** • **3-Scenario 2-Stage DCF**"
     )
 
-    with st.spinner(f"Fetching multi-source Indian financials (Screener.in + NSE/BSE) for {target_ticker}..."):
+    with st.spinner(f"Fetching annual, quarterly, and peer financials for {target_ticker}..."):
         try:
             bundle = fetch_company_bundle(target_ticker)
             metrics = extract_comprehensive_metrics(bundle)
+            qtr_analysis = extract_quarterly_trend_analysis(bundle)
             checklist_result = evaluate_sector_checklist(bundle, metrics)
             df_peers, peer_medians = fetch_industry_peer_benchmarks(
                 target_ticker=target_ticker,
@@ -1903,7 +2136,7 @@ def main() -> None:
         f"**Industry Profile:** {profile['profile_name']} | **Sector:** {bundle['sector']} ({bundle['industry']}) | "
         f"**Current Market Price:** {format_inr_price(current_price)} | "
         f"**Market Cap:** {format_inr_crores(mcap)} | "
-        f"**Data Feeds Active:** `Yahoo Finance API` + `{'Screener.in Consolidated' if scr_ok else 'NSE Sector Fallback'}`"
+        f"**Data Feeds Active:** `Yahoo Finance API` + `{'Screener.in Consolidated & Quarterly' if scr_ok else 'NSE Sector Fallback'}`"
     )
     st.info(f"🧭 **Industry-Adaptive Routing:** {profile['applicable_note']}")
 
@@ -1918,9 +2151,9 @@ def main() -> None:
     st.divider()
 
     # --------------------------------------------------------------------------
-    # SECTION 1: ROE, ROCE, MOAT KPIs & 3-YEAR HISTORICAL TABLE
+    # SECTION 1: ROE, ROCE, MOAT KPIs, ANNUAL & LAST 4 QUARTERS TREND TABLES
     # --------------------------------------------------------------------------
-    st.header("1. Business Health, Capital Efficiency (ROE & ROCE) & Moat")
+    st.header("1. Business Health, Capital Efficiency (ROE & ROCE) & Quarterly Turnaround Scanner")
 
     k1, k2, k3, k4, k5 = st.columns(5)
     with k1:
@@ -1983,8 +2216,26 @@ def main() -> None:
             delta_color="normal" if (pe_v is not None and pe_med_v is not None and pe_v <= pe_med_v) else "off",
         )
 
-    st.markdown("#### 📊 Multi-Year Historical Financial Performance (₹ Crores)")
-    hist_df = build_three_year_history_table(bundle, metrics)
+    # --- NEW: LAST 4 QUARTERS RESULTS TREND TABLE (QoQ & YoY) ---
+    st.markdown("#### ⚡ Last 4 Quarters Results Trend & Early Turnaround Scanner (QoQ & YoY)")
+    if qtr_analysis["available"]:
+        q_color = qtr_analysis["turnaround_badge_color"]
+        st.markdown(
+            f"""
+            <div style="background-color: #1e293b; border-left: 6px solid {q_color}; padding: 12px 16px; border-radius: 6px; margin-bottom: 12px;">
+                <strong style="color: {q_color}; font-size: 1.0rem;">{qtr_analysis['turnaround_status']}</strong>
+                <span style="color: #94a3b8; font-size: 0.85rem;"> &nbsp;•&nbsp; Source: {qtr_analysis['source_used']}</span><br>
+                <span style="color: #e2e8f0; font-size: 0.94rem;">{qtr_analysis['turnaround_summary']}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.dataframe(qtr_analysis["df_quarterly"], use_container_width=True)
+    else:
+        st.info(qtr_analysis["turnaround_summary"])
+
+    st.markdown("#### 📊 Multi-Year Annual Financial Performance (₹ Crores)")
+    hist_df = build_three_year_history_table(bundle)
     if not hist_df.empty:
         st.dataframe(hist_df, use_container_width=True)
 
@@ -2056,7 +2307,7 @@ def main() -> None:
 
     rev_yoy, rev_cagr = metrics["rev_growth"]["recent_yoy_pct"], metrics["rev_growth"]["past_cagr_pct"]
     eb_yoy, eb_cagr = metrics["ebitda_growth"]["recent_yoy_pct"], metrics["ebitda_growth"]["past_cagr_pct"]
-    ni_yoy, ni_cagr = metrics["ni_growth"]["recent_yoy_pct"], metrics["ni_growth"]["past_cagr_pct"]
+    ni_yoy = metrics["ni_growth"]["recent_yoy_pct"]
     eps_yoy, eps_cagr = metrics["eps_growth"]["recent_yoy_pct"], metrics["eps_growth"]["past_cagr_pct"]
 
     em_curr = metrics["ebitda_margin_curr"]
@@ -2164,7 +2415,7 @@ def main() -> None:
         },
     ]
 
-    st.markdown("#### 📈 Current vs. Past Growth & Margin Trajectory (Benchmarked vs. NSE Sector Median)")
+    st.markdown("#### 📈 Current vs. Past Annual Growth & Margin Trajectory (Benchmarked vs. NSE Sector Median)")
     st.dataframe(pd.DataFrame(comparison_rows).set_index("Metric"), use_container_width=True)
 
     if not df_peers.empty:
@@ -2273,6 +2524,7 @@ def main() -> None:
         current_price=current_price,
         profile=profile,
         metrics=metrics,
+        qtr_analysis=qtr_analysis,
         peer_medians=peer_medians,
         scenarios=scenarios,
         news_summary=news_summary,
@@ -2282,7 +2534,7 @@ def main() -> None:
 
     dc1, dc2, dc3 = st.columns(3)
     with dc1:
-        st.metric("Fundamentals, Sector Checklist & Valuation (70%)", f"{decision['fundamental_score_70']:.1f} / 70.0")
+        st.metric("Fundamentals, Quarterly Trend & Valuation (70%)", f"{decision['fundamental_score_70']:.1f} / 70.0")
     with dc2:
         st.metric("Corporate Catalyst Sentiment (30%)", f"{decision['sentiment_score_30']:.1f} / 30.0")
     with dc3:
@@ -2290,7 +2542,10 @@ def main() -> None:
 
     st.progress(int(round(decision["total_score"])))
 
-    # Prominent Verdict Banner + Tentative Years to Intrinsic Value
+    base_iv_fmt = format_inr_price(base_res["blended_intrinsic"])
+    cons_iv_fmt = format_inr_price(scenarios["Conservative"]["blended_intrinsic"])
+    opt_iv_fmt = format_inr_price(scenarios["Optimistic"]["blended_intrinsic"])
+
     st.markdown(
         f"""
         <div style="
@@ -2306,19 +2561,18 @@ def main() -> None:
                 <span style="color: {decision['badge_color']};">{decision['verdict']}</span>
             </h2>
             <p style="color: #38bdf8; font-size: 1.05rem; font-weight: 600; margin: 0 0 6px 0;">
-                ⏳ Tentative Expected Time to Reach Base-Case Intrinsic Value ({format_inr_price(base_res['blended_intrinsic'])}):
+                ⏳ Tentative Expected Time to Reach Base-Case Intrinsic Value ({base_iv_fmt}):
                 <span style="color: #f8fafc;">{decision['base_timeline_label']}</span>
             </p>
             <p style="color: #94a3b8; font-size: 0.92rem; margin: 0;">
-                • <b>Conservative Scenario ({format_inr_price(scenarios['Conservative']['blended_intrinsic'])}):</b> {decision['cons_timeline_label']} &nbsp;|&nbsp;
-                • <b>Optimistic Scenario ({format_inr_price(scenarios['Optimistic']['blended_intrinsic'])}):</b> {decision['opt_timeline_label']}
+                • <b>Conservative Scenario ({cons_iv_fmt}):</b> {decision['cons_timeline_label']} &nbsp;|&nbsp;
+                • <b>Optimistic Scenario ({opt_iv_fmt}):</b> {decision['opt_timeline_label']}
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Separated Positive Points vs Key Risks to Consider
     pos_col, risk_col = st.columns(2)
     with pos_col:
         st.markdown("### 🟢 Positive Points & Bullish Catalysts")
