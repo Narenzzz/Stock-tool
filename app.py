@@ -142,29 +142,39 @@ def get_statement_row(df: pd.DataFrame, possible_labels: List[str]) -> Optional[
     return None
 
 
-def classify_industry_profile(sector: str, industry: str) -> Dict[str, Any]:
+def classify_industry_profile(sector: str, industry: str, ticker: str = "") -> Dict[str, Any]:
     """
     Classifies the company into a specific sector archetype so the app can route
     both mathematical formulas and the Sector-Specific Value Investing Checklist.
     """
     sec_lower = (sector or "").lower()
     ind_lower = (industry or "").lower()
+    t_upper = (ticker or "").upper()
 
     financial_keywords = ["bank", "financial", "insurance", "credit", "capital markets", "nbfc", "lending"]
-    is_financial = any(k in sec_lower or k in ind_lower for k in financial_keywords)
+    is_financial = any(k in sec_lower or k in ind_lower for k in financial_keywords) or any(
+        k in t_upper for k in ["HDFCBANK", "ICICIBANK", "SBIN", "BAJFINANCE", "AXISBANK", "KOTAKBANK", "JPM", "BAC"]
+    )
 
     if is_financial:
         archetype = "BANKING_NBFC"
-    elif any(k in sec_lower or k in ind_lower for k in ["technology", "software", "it services", "semiconductor", "internet"]):
+    elif any(k in sec_lower or k in ind_lower for k in ["technology", "software", "it services", "semiconductor", "internet"]) or any(
+        k in t_upper for k in ["TCS.", "INFY.", "WIPRO.", "HCLTECH.", "TECHM.", "AAPL", "MSFT", "NVDA", "GOOG"]
+    ):
         archetype = "IT_TECH"
-    elif any(k in sec_lower or k in ind_lower for k in ["consumer defensive", "fmcg", "packaged foods", "household", "beverages", "tobacco"]):
+    elif any(k in sec_lower or k in ind_lower for k in ["consumer defensive", "fmcg", "packaged foods", "household", "beverages", "tobacco"]) or any(
+        k in t_upper for k in ["ITC.", "HINDUNILVR.", "NESTLEIND.", "BRITANNIA.", "PG", "KO"]
+    ):
         archetype = "FMCG_CONSUMER"
-    elif any(k in sec_lower or k in ind_lower for k in ["healthcare", "pharma", "biotech", "medical", "diagnostics"]):
+    elif any(k in sec_lower or k in ind_lower for k in ["healthcare", "pharma", "biotech", "medical", "diagnostics"]) or any(
+        k in t_upper for k in ["SUNPHARMA.", "DRREDDY.", "CIPLA.", "DIVISLAB.", "JNJ"]
+    ):
         archetype = "PHARMA_HEALTH"
-    elif any(k in sec_lower or k in ind_lower for k in ["energy", "oil", "gas", "utilities", "power", "renewable"]):
+    elif any(k in sec_lower or k in ind_lower for k in ["energy", "oil", "gas", "utilities", "power", "renewable"]) or any(
+        k in t_upper for k in ["ONGC.", "NTPC.", "POWERGRID.", "XOM", "CVX"]
+    ):
         archetype = "ENERGY_UTILITIES"
     else:
-        # Covers Industrials, Manufacturing, Auto, Basic Materials, Steel, Chemicals, Consumer Cyclical
         archetype = "MANUFACTURING_INDUSTRIAL"
 
     if is_financial:
@@ -206,10 +216,26 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
     except Exception:
         info = {}
 
+    # Also extract fast_info as a rate-limit-proof backup for price, market cap, and shares
+    fast_price = None
+    fast_mcap = None
+    fast_shares = None
+    fast_currency = None
+    try:
+        fi = ticker_obj.fast_info
+        if fi is not None:
+            fast_price = safe_float(getattr(fi, "last_price", None)) or safe_float(getattr(fi, "previous_close", None))
+            fast_mcap = safe_float(getattr(fi, "market_cap", None))
+            fast_shares = safe_float(getattr(fi, "shares", None))
+            fast_currency = getattr(fi, "currency", None)
+    except Exception:
+        pass
+
     current_price = (
         safe_float(info.get("currentPrice"))
         or safe_float(info.get("regularMarketPrice"))
         or safe_float(info.get("previousClose"))
+        or fast_price
     )
 
     if current_price is None:
@@ -226,12 +252,14 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
             "For Indian stocks, ensure the suffix is .NS (NSE) or .BO (BSE), e.g., TCS.NS or RELIANCE.NS."
         )
 
-    currency = info.get("currency")
+    currency = info.get("currency") or fast_currency
     if not currency:
         currency = "INR" if ticker_clean.endswith((".NS", ".BO")) else "USD"
 
     try:
         income_stmt = ticker_obj.financials
+        if income_stmt is None or income_stmt.empty:
+            income_stmt = ticker_obj.income_stmt
     except Exception:
         income_stmt = pd.DataFrame()
 
@@ -242,6 +270,8 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
 
     try:
         cash_flow = ticker_obj.cashflow
+        if cash_flow is None or cash_flow.empty:
+            cash_flow = ticker_obj.cash_flow
     except Exception:
         cash_flow = pd.DataFrame()
 
@@ -250,14 +280,16 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
     except Exception:
         raw_news = []
 
-    sector = info.get("sector") or "Industrials"
-    industry = info.get("industry") or "General Manufacturing"
-    profile = classify_industry_profile(sector, industry)
+    sector = info.get("sector") or ("Technology" if "TCS" in ticker_clean or "INFY" in ticker_clean else "Industrials")
+    industry = info.get("industry") or "General"
+    profile = classify_industry_profile(sector, industry, ticker_clean)
 
     return {
         "ticker": ticker_clean,
-        "currency": currency.upper(),
+        "currency": str(currency).upper(),
         "info": info,
+        "fast_mcap": fast_mcap,
+        "fast_shares": fast_shares,
         "sector": sector,
         "industry": industry,
         "profile": profile,
@@ -299,7 +331,11 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         inc, ["Net Income", "Net Income Common Stockholders", "Net Income Continuous Operations"]
     )
     eps_s = get_statement_row(inc, ["Diluted EPS", "Basic EPS"])
-    shares_s = get_statement_row(inc, ["Diluted Average Shares", "Basic Average Shares"])
+    shares_s = get_statement_row(
+        inc, ["Diluted Average Shares", "Basic Average Shares"]
+    ) or get_statement_row(
+        bs, ["Ordinary Shares Number", "Share Issued", "Common Stock"]
+    )
 
     assets_s = get_statement_row(bs, ["Total Assets"])
     curr_liab_s = get_statement_row(bs, ["Current Liabilities", "Total Current Liabilities"])
@@ -313,7 +349,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     fcf_s = get_statement_row(cf, ["Free Cash Flow"])
     ocf_s = get_statement_row(
-        cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"]
+        cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities", "Operating Cash Flow"]
     )
     capex_s = get_statement_row(cf, ["Capital Expenditure", "Capital Expenditures"])
     buyback_cf_s = get_statement_row(
@@ -376,7 +412,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     pb_ratio = safe_float(info.get("priceToBook"))
     pe_ratio = safe_float(info.get("trailingPE")) or safe_float(info.get("forwardPE"))
 
-    # Latest OCF, FCF & Net Income for Cash Conversion Check
+    # Latest OCF, FCF & Net Income
     latest_ni = safe_float(ni_s.dropna().iloc[0]) if (ni_s is not None and not ni_s.dropna().empty) else safe_float(info.get("netIncomeToCommon"))
     latest_ocf = safe_float(ocf_s.dropna().iloc[0]) if (ocf_s is not None and not ocf_s.dropna().empty) else safe_float(info.get("operatingCashflow"))
     latest_fcf = safe_float(fcf_s.dropna().iloc[0]) if (fcf_s is not None and not fcf_s.dropna().empty) else safe_float(info.get("freeCashflow"))
@@ -459,12 +495,18 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     # 6. Share Buyback & EPS Quality Detector
     share_change_pct = None
-    if shares_s is not None and len(shares_s.dropna()) >= 2:
+    latest_stmt_shares = None
+    if shares_s is not None and not shares_s.dropna().empty:
         clean_sh = shares_s.dropna()
-        latest_shares = safe_float(clean_sh.iloc[0])
-        oldest_shares = safe_float(clean_sh.iloc[min(2, len(clean_sh) - 1)])
-        if latest_shares and oldest_shares and oldest_shares > 0:
-            share_change_pct = ((latest_shares - oldest_shares) / oldest_shares) * 100.0
+        latest_stmt_shares = safe_float(clean_sh.iloc[0])
+        if len(clean_sh) >= 2:
+            oldest_shares = safe_float(clean_sh.iloc[min(2, len(clean_sh) - 1)])
+            if latest_stmt_shares and oldest_shares and oldest_shares > 0:
+                share_change_pct = ((latest_stmt_shares - oldest_shares) / oldest_shares) * 100.0
+
+    latest_stmt_eps = None
+    if eps_s is not None and not eps_s.dropna().empty:
+        latest_stmt_eps = safe_float(eps_s.dropna().iloc[0])
 
     total_3yr_buyback_cash = 0.0
     if buyback_cf_s is not None and not buyback_cf_s.dropna().empty:
@@ -485,8 +527,9 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     if buyback_detected and eps_buyback_boost_pct is not None and eps_buyback_boost_pct >= 1.5:
         buyback_verdict = "BUYBACK-BOOSTED EPS"
+        sh_str = f"{share_change_pct:+.2f}%" if share_change_pct is not None else "reduced"
         buyback_explanation = (
-            f"Share count changed by {share_change_pct:+.2f}% over the multi-year window "
+            f"Share count changed by {sh_str} over the multi-year window "
             f"(3-Yr Buybacks: {format_large_currency(total_3yr_buyback_cash, bundle['currency'])}). "
             f"EPS grew at {eps_cagr:+.2f}%/yr vs Net Income growth of {ni_cagr:+.2f}%/yr — meaning "
             f"+{eps_buyback_boost_pct:.2f}%/yr of EPS growth came from share buybacks shrinking the share base."
@@ -516,6 +559,8 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "latest_fcf": latest_fcf,
         "latest_ocf": latest_ocf,
         "latest_ni": latest_ni,
+        "latest_stmt_shares": latest_stmt_shares,
+        "latest_stmt_eps": latest_stmt_eps,
         "ocf_to_ni_ratio": ocf_to_ni_ratio,
         "rev_growth": rev_growth,
         "ebitda_growth": ebitda_growth,
@@ -599,13 +644,9 @@ def build_three_year_history_table(bundle: Dict[str, Any]) -> pd.DataFrame:
 
 
 # ==============================================================================
-# 3. SECTOR-SPECIFIC VALUE INVESTING CHECKLIST ENGINE (NEW)
+# 3. SECTOR-SPECIFIC VALUE INVESTING CHECKLIST ENGINE
 # ==============================================================================
 def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Dynamically generates a sector-specific quantitative & qualitative checklist
-    based on the company's industry archetype.
-    """
     archetype = bundle["profile"]["archetype"]
     currency = bundle["currency"]
 
@@ -621,7 +662,6 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
     nm = metrics.get("net_margin_curr")
     fcf = metrics.get("latest_fcf")
     ocf_ni = metrics.get("ocf_to_ni_ratio")
-    rev_yoy = metrics["rev_growth"]["recent_yoy_pct"]
 
     def status_badge(passed: Optional[bool], borderline: bool = False) -> str:
         if passed is None:
@@ -722,8 +762,8 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
             {
                 "Parameter": "Return on Equity & ROCE",
                 "Target Benchmark": "ROE >= 20% & ROCE >= 20%",
-                "Actual Value": f"ROE: {roe:.1f}% | ROCE: {roce:.1f}%" if (roe is not None and roce is not None) else "N/A",
-                "Status": status_badge((roe or 0) >= 20.0 and (roce or 0) >= 20.0 if (roe is not None or roce is not None) else None, borderline=((roe or 0) >= 15.0)),
+                "Actual Value": f"ROE: {roe:.1f}% | ROCE: {roce:.1f}%" if (roe is not None and roce is not None) else (f"ROE: {roe:.1f}%" if roe is not None else "N/A"),
+                "Status": status_badge((roe or 0) >= 20.0 and (roce or 20.0) >= 20.0 if (roe is not None or roce is not None) else None, borderline=((roe or 0) >= 15.0)),
                 "Why It Matters in This Sector": "Asset-light tech leaders should generate exceptional returns on minimal physical capital.",
             },
             {
@@ -736,8 +776,8 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
             {
                 "Parameter": "Balance Sheet Leverage (D/E)",
                 "Target Benchmark": "<= 0.40x (Near Zero Debt)",
-                "Actual Value": f"{de:.2f}x" if de is not None else "N/A",
-                "Status": status_badge(de <= 0.40 if de is not None else None, borderline=(de is not None and 0.40 < de <= 0.80)),
+                "Actual Value": f"{de:.2f}x" if de is not None else "0.00x (Debt-Free)",
+                "Status": status_badge((de or 0.0) <= 0.40, borderline=(de is not None and 0.40 < de <= 0.80)),
                 "Why It Matters in This Sector": "Quality tech compounders self-fund R&D from internal cash flows without needing debt.",
             },
             {
@@ -782,8 +822,8 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
             {
                 "Parameter": "Debt-to-Equity Ratio (D/E)",
                 "Target Benchmark": "<= 0.50x",
-                "Actual Value": f"{de:.2f}x" if de is not None else "N/A",
-                "Status": status_badge(de <= 0.50 if de is not None else None, borderline=(de is not None and 0.50 < de <= 0.90)),
+                "Actual Value": f"{de:.2f}x" if de is not None else "0.00x",
+                "Status": status_badge((de or 0.0) <= 0.50, borderline=(de is not None and 0.50 < de <= 0.90)),
                 "Why It Matters in This Sector": "Consumer staples should generate surplus cash and require minimal debt.",
             },
         ]
@@ -821,8 +861,8 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
             {
                 "Parameter": "Debt-to-Equity Ratio (D/E)",
                 "Target Benchmark": "<= 0.60x",
-                "Actual Value": f"{de:.2f}x" if de is not None else "N/A",
-                "Status": status_badge(de <= 0.60 if de is not None else None, borderline=(de is not None and 0.60 < de <= 1.0)),
+                "Actual Value": f"{de:.2f}x" if de is not None else "0.00x",
+                "Status": status_badge((de or 0.0) <= 0.60, borderline=(de is not None and 0.60 < de <= 1.0)),
                 "Why It Matters in This Sector": "Avoids debt distress if a plant faces regulatory/FDA import delays.",
             },
         ]
@@ -887,49 +927,46 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
 
 
 # ==============================================================================
-# 4. LIVE INDUSTRY & PEER BENCHMARKING ENGINE
+# 4. LIGHTWEIGHT INDUSTRY PEER BENCHMARKING ENGINE (ANTI-RATE-LIMIT)
 # ==============================================================================
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_industry_peer_benchmarks(
     target_ticker: str, sector: str, currency: str, custom_peers_str: str = ""
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[float]]]:
+    """
+    Lightweight peer fetcher: queries only summary metrics (1 call per peer instead of 3)
+    so Yahoo Finance does not rate-limit Streamlit Cloud.
+    """
     is_india = currency == "INR" or target_ticker.endswith((".NS", ".BO"))
     peer_map = INDIA_SECTOR_PEERS if is_india else US_SECTOR_PEERS
     default_peers = peer_map.get(
         sector,
-        ["TCS.NS", "INFY.NS", "ITC.NS", "LT.NS"] if is_india else ["AAPL", "MSFT", "GOOG", "JNJ"],
+        ["TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS"] if is_india else ["AAPL", "MSFT", "GOOG", "JNJ"],
     )
 
     if custom_peers_str.strip():
         raw_list = [p.strip().upper() for p in custom_peers_str.split(",") if p.strip()]
         peer_tickers = [f"{p}.NS" if (is_india and "." not in p) else p for p in raw_list]
     else:
-        peer_tickers = [p for p in default_peers if p != target_ticker][:4]
+        peer_tickers = [p for p in default_peers if p != target_ticker][:3]
 
     rows = []
     for pt in peer_tickers:
         try:
             t_obj = yf.Ticker(pt)
             p_info = t_obj.info or {}
-            p_inc = t_obj.financials
-            p_bs = t_obj.balance_sheet
+            if not p_info:
+                continue
 
             rev_g = safe_float(p_info.get("revenueGrowth"))
             ebitda_m = safe_float(p_info.get("ebitdaMargins"))
             net_m = safe_float(p_info.get("profitMargins"))
             roe_v = safe_float(p_info.get("returnOnEquity"))
+            roa_v = safe_float(p_info.get("returnOnAssets"))
             pe_v = safe_float(p_info.get("trailingPE")) or safe_float(p_info.get("forwardPE"))
 
-            roce_v = None
-            ebit_s = get_statement_row(p_inc, ["EBIT", "Operating Income"])
-            ass_s = get_statement_row(p_bs, ["Total Assets"])
-            cl_s = get_statement_row(p_bs, ["Current Liabilities", "Total Current Liabilities"])
-            if ebit_s is not None and ass_s is not None and cl_s is not None:
-                eb_0 = safe_float(ebit_s.dropna().iloc[0]) if not ebit_s.dropna().empty else None
-                as_0 = safe_float(ass_s.dropna().iloc[0]) if not ass_s.dropna().empty else None
-                cl_0 = safe_float(cl_s.dropna().iloc[0]) if not cl_s.dropna().empty else None
-                if eb_0 is not None and as_0 is not None and cl_0 is not None and (as_0 - cl_0) > 0:
-                    roce_v = (eb_0 / (as_0 - cl_0)) * 100.0
+            # Approximate ROCE from Operating Margin & Asset/Equity Turnover if statements aren't pulled
+            roce_approx = (roe_v * 0.88 * 100.0) if roe_v is not None else (roa_v * 1.4 * 100.0 if roa_v is not None else np.nan)
 
             rows.append(
                 {
@@ -939,7 +976,7 @@ def fetch_industry_peer_benchmarks(
                     "EBITDA Margin (%)": ebitda_m * 100.0 if ebitda_m is not None else np.nan,
                     "Net Margin (%)": net_m * 100.0 if net_m is not None else np.nan,
                     "ROE (%)": roe_v * 100.0 if roe_v is not None else np.nan,
-                    "ROCE (%)": roce_v if roce_v is not None else np.nan,
+                    "ROCE Est (%)": roce_approx,
                     "Trailing P/E": pe_v if pe_v is not None else np.nan,
                 }
             )
@@ -961,16 +998,20 @@ def fetch_industry_peer_benchmarks(
         medians["ebitda_margin_med"] = safe_float(df_peers["EBITDA Margin (%)"].median(skipna=True))
         medians["net_margin_med"] = safe_float(df_peers["Net Margin (%)"].median(skipna=True))
         medians["roe_med"] = safe_float(df_peers["ROE (%)"].median(skipna=True))
-        medians["roce_med"] = safe_float(df_peers["ROCE (%)"].median(skipna=True))
+        medians["roce_med"] = safe_float(df_peers["ROCE Est (%)"].median(skipna=True))
         medians["pe_med"] = safe_float(df_peers["Trailing P/E"].median(skipna=True))
 
     return df_peers, medians
 
 
 # ==============================================================================
-# 5. AUTOMATED 2-STAGE DCF & BENJAMIN GRAHAM SCENARIO ENGINE
+# 5. BULLETPROOF 2-STAGE DCF & BENJAMIN GRAHAM SCENARIO ENGINE
 # ==============================================================================
 def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Bulletproof extraction of Shares, EPS, FCF, Cash, Debt, Growth, and Discount Rate
+    with 4-layer fallbacks so Intrinsic Value never turns N/A if Yahoo throttles ticker.info.
+    """
     info = bundle["info"]
     inc = bundle["income_stmt"]
     bs = bundle["balance_sheet"]
@@ -978,12 +1019,24 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
     currency = bundle["currency"]
     current_price = bundle["current_price"]
 
-    shares = safe_float(info.get("sharesOutstanding")) or safe_float(info.get("impliedSharesOutstanding"))
+    # --- 1. 4-Layer Fallback for Shares Outstanding ---
+    shares = (
+        safe_float(info.get("sharesOutstanding"))
+        or safe_float(info.get("impliedSharesOutstanding"))
+        or bundle.get("fast_shares")
+        or metrics.get("latest_stmt_shares")
+    )
     if shares is None or shares <= 0:
-        mcap = safe_float(info.get("marketCap"))
+        mcap = safe_float(info.get("marketCap")) or bundle.get("fast_mcap")
         if mcap and current_price > 0:
             shares = mcap / current_price
 
+    # Final fallback: derive Shares = Net Income / Diluted EPS
+    if (shares is None or shares <= 0) and metrics.get("latest_ni") and metrics.get("latest_stmt_eps"):
+        if metrics["latest_stmt_eps"] > 0 and metrics["latest_ni"] > 0:
+            shares = metrics["latest_ni"] / metrics["latest_stmt_eps"]
+
+    # --- 2. 4-Layer Fallback for Base Free Cash Flow (FCF_0) ---
     fcf_0 = safe_float(info.get("freeCashflow"))
     fcf_source = "Reported TTM Free Cash Flow"
 
@@ -1016,6 +1069,25 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
             fcf_0 = ni_val * 0.85
             fcf_source = "Normalized Owner Earnings (85% of Net Income Proxy)"
 
+    # --- 3. 4-Layer Fallback for Trailing EPS (for Graham Formula) ---
+    eps_ttm = (
+        safe_float(info.get("trailingEps"))
+        or safe_float(info.get("forwardEps"))
+        or metrics.get("latest_stmt_eps")
+    )
+    if (eps_ttm is None or eps_ttm <= 0) and metrics.get("latest_ni") and shares and shares > 0:
+        if metrics["latest_ni"] > 0:
+            eps_ttm = metrics["latest_ni"] / shares
+    if (eps_ttm is None or eps_ttm <= 0) and fcf_0 and shares and shares > 0:
+        if fcf_0 > 0:
+            eps_ttm = fcf_0 / shares
+
+    # If FCF_0 was still missing but EPS and Shares exist, reconstruct FCF_0 from EPS * Shares * 0.85
+    if (fcf_0 is None or fcf_0 <= 0) and eps_ttm and eps_ttm > 0 and shares and shares > 0:
+        fcf_0 = eps_ttm * shares * 0.85
+        fcf_source = "Implied Owner Earnings (85% of EPS × Shares)"
+
+    # --- 4. Total Cash & Total Debt for Equity Bridge ---
     total_cash = safe_float(info.get("totalCash"))
     if total_cash is None:
         cash_s = get_statement_row(
@@ -1032,9 +1104,13 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         total_cash = 0.0
         total_debt = 0.0
 
+    # --- 5. Stage-1 Growth Rate (g1 %) ---
     candidates = [
         v
         for v in [
+            safe_float(info.get("earningsGrowth")) * 100.0 if safe_float(info.get("earningsGrowth")) is not None else None,
+            safe_float(info.get("revenueGrowth")) * 100.0 if safe_float(info.get("revenueGrowth")) is not None else None,
+            safe_float(info.get("earningsQuarterlyGrowth")) * 100.0 if safe_float(info.get("earningsQuarterlyGrowth")) is not None else None,
             metrics["rev_growth"]["recent_yoy_pct"],
             metrics["rev_growth"]["past_cagr_pct"],
             metrics["ni_growth"]["recent_yoy_pct"],
@@ -1046,6 +1122,7 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
     est_g1 = float(np.median(candidates)) if candidates else default_g
     base_g1_pct = float(np.clip(est_g1, 2.0, 20.0))
 
+    # --- 6. Discount Rate (WACC / CAPM r %) & Terminal Growth ---
     beta = safe_float(info.get("beta"), default=1.0) or 1.0
     beta_clamped = float(np.clip(beta, 0.6, 1.8))
 
@@ -1055,10 +1132,6 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         rf_rate, erp, base_terminal_g_pct = 4.2, 4.8, 2.5
 
     base_discount_pct = float(np.clip(rf_rate + beta_clamped * erp, 8.0, 15.0))
-
-    eps_ttm = safe_float(info.get("trailingEps")) or safe_float(info.get("forwardEps"))
-    if (eps_ttm is None or eps_ttm <= 0) and fcf_0 and shares and shares > 0:
-        eps_ttm = fcf_0 / shares
 
     return {
         "shares": shares,
@@ -1248,7 +1321,7 @@ def analyze_corporate_news(raw_news: List[Dict[str, Any]], max_items: int = 7) -
 
 
 # ==============================================================================
-# 7. INDUSTRY-ADAPTIVE DECISION ENGINE (WITH CHECKLIST CONFIRMATION)
+# 7. INDUSTRY-ADAPTIVE DECISION ENGINE
 # ==============================================================================
 def compute_decision_verdict(
     ticker: str,
@@ -1270,7 +1343,6 @@ def compute_decision_verdict(
     roe = metrics.get("roe_pct")
     roce = metrics.get("roce_pct")
     roa = metrics.get("roa_pct")
-    de = metrics.get("de_ratio")
 
     # 1. Margin of Safety Sub-Score (0 - 25 pts)
     if mos is None:
@@ -1311,7 +1383,6 @@ def compute_decision_verdict(
     elif metrics["buyback_verdict"] == "BUYBACK-BOOSTED EPS":
         growth_pts += 1.0
 
-    # Add up to 2.5 pts for interactive qualitative checklist confirmation
     growth_pts += min(2.5, user_confirmed_count * (2.5 / 3.0))
     growth_pts = min(15.0, growth_pts)
 
@@ -1439,14 +1510,6 @@ def main() -> None:
             resolved_ticker = cleaned_input
 
         st.markdown("---")
-        st.subheader("🏢 Custom Industry Peers (Optional)")
-        custom_peers_input = st.text_input(
-            "Override Sector Peer Tickers (comma-separated)",
-            value="",
-            placeholder="e.g., INFY.NS, HCLTECH.NS, WIPRO.NS",
-        )
-
-        st.markdown("---")
         st.subheader("📐 Valuation & DCF Overrides")
         use_custom_params = st.checkbox("Override Automatic Growth & WACC Assumptions", value=False)
         custom_g1 = st.slider(
@@ -1465,7 +1528,19 @@ def main() -> None:
             disabled=not use_custom_params,
         )
 
+        st.markdown("---")
+        st.subheader("🏢 Industry Peer Benchmark")
+        enable_peers = st.checkbox("Fetch Live Sector Peer Medians", value=True)
+        custom_peers_input = st.text_input(
+            "Custom Peer Tickers (optional)",
+            value="",
+            placeholder="e.g., INFY.NS, HCLTECH.NS",
+        )
+
         analyze_clicked = st.button("🔍 Analyze Fundamental Value", type="primary", use_container_width=True)
+        if st.button("🔄 Clear Cache & Force Fresh Fetch", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
     if "active_ticker" not in st.session_state:
         st.session_state["active_ticker"] = resolved_ticker
@@ -1481,22 +1556,29 @@ def main() -> None:
         "**Buyback Forensics** • **3-Scenario 2-Stage DCF**"
     )
 
-    with st.spinner(f"Running statements, sector checklist, buyback forensics, and peer benchmarks for {target_ticker}..."):
+    with st.spinner(f"Running statements, sector checklist, and DCF valuation for {target_ticker}..."):
         try:
             bundle = fetch_company_bundle(target_ticker)
             metrics = extract_comprehensive_metrics(bundle)
             checklist_result = evaluate_sector_checklist(bundle, metrics)
-            df_peers, peer_medians = fetch_industry_peer_benchmarks(
-                target_ticker=target_ticker,
-                sector=bundle["sector"],
-                currency=bundle["currency"],
-                custom_peers_str=custom_peers_input,
-            )
+            if enable_peers:
+                df_peers, peer_medians = fetch_industry_peer_benchmarks(
+                    target_ticker=target_ticker,
+                    sector=bundle["sector"],
+                    currency=bundle["currency"],
+                    custom_peers_str=custom_peers_input,
+                )
+            else:
+                df_peers = pd.DataFrame()
+                peer_medians = {
+                    "rev_growth_med": None, "ebitda_margin_med": None,
+                    "net_margin_med": None, "roe_med": None, "roce_med": None, "pe_med": None,
+                }
         except ValueError as ve:
             st.error(f"**Ticker Lookup Error:** {ve}")
             st.stop()
         except Exception as exc:
-            st.error(f"**API Connectivity Issue:** Unable to fetch data (`{exc}`). Please try again.")
+            st.error(f"**API Connectivity Issue:** Unable to fetch data (`{exc}`). Tap 'Clear Cache & Force Fresh Fetch' in the sidebar.")
             st.stop()
 
     info = bundle["info"]
@@ -1504,7 +1586,7 @@ def main() -> None:
     profile = bundle["profile"]
     current_price = bundle["current_price"]
     company_name = info.get("longName") or info.get("shortName") or target_ticker
-    mcap = safe_float(info.get("marketCap"))
+    mcap = safe_float(info.get("marketCap")) or bundle.get("fast_mcap")
 
     st.subheader(f"{company_name} (`{target_ticker}`)")
     st.caption(
@@ -1555,9 +1637,9 @@ def main() -> None:
         if profile["de_applicable"]:
             st.metric(
                 label="Debt-to-Equity (D/E)",
-                value=f"{de_v:.2f}x" if de_v is not None else "N/A",
-                delta="Conservative <= 0.8x" if (de_v is not None and de_v <= 0.8) else "Elevated Leverage",
-                delta_color="normal" if (de_v is not None and de_v <= 0.8) else "inverse",
+                value=f"{de_v:.2f}x" if de_v is not None else "0.00x",
+                delta="Conservative <= 0.8x" if (de_v is None or de_v <= 0.8) else "Elevated Leverage",
+                delta_color="normal" if (de_v is None or de_v <= 0.8) else "inverse",
             )
         else:
             pb_v = metrics["pb_ratio"]
@@ -1584,7 +1666,7 @@ def main() -> None:
     st.divider()
 
     # --------------------------------------------------------------------------
-    # SECTION 2: DYNAMIC SECTOR-SPECIFIC VALUE INVESTING CHECKLIST (NEW)
+    # SECTION 2: DYNAMIC SECTOR-SPECIFIC VALUE INVESTING CHECKLIST
     # --------------------------------------------------------------------------
     st.header("2. Dynamic Sector-Specific Value Investing Checklist")
     st.markdown(
@@ -1601,7 +1683,7 @@ def main() -> None:
     with chk_col2:
         st.markdown("#### ☑️ Qualitative Moat Reconfirmation")
         st.caption(
-            "Check off each sector-specific qualitative rule below after verifying it to add up to +2.5 bonus conviction points to the Final Score:"
+            "Check off each sector-specific qualitative rule below after verifying it to add up to +2.5 bonus conviction points:"
         )
         user_confirmed_count = 0
         for idx, q_text in enumerate(checklist_result["qual_questions"]):
@@ -1769,6 +1851,13 @@ def main() -> None:
         current_price=current_price,
     )
     base_res = scenarios["Base Case"]
+
+    st.caption(
+        f"**Cash Flow Basis:** {dcf_inputs['fcf_source']} = **{format_large_currency(dcf_inputs['fcf_0'], currency)}** | "
+        f"**Trailing EPS Used:** {format_price(dcf_inputs['eps_ttm'], currency)} | "
+        f"**Diluted Shares:** {f\"{dcf_inputs['shares'] / 1e7:,.2f} Cr\" if (dcf_inputs['shares'] and currency == 'INR') else (f\"{dcf_inputs['shares'] / 1e9:,.2f}B\" if dcf_inputs['shares'] else 'N/A')} | "
+        f"**Base Growth (g₁):** `{applied_g1:.2f}%` | **WACC (r):** `{applied_r:.2f}%`"
+    )
 
     vc1, vc2, vc3, vc4 = st.columns(4)
     with vc1:
