@@ -2897,16 +2897,7 @@ def main() -> None:
             checklist_result=checklist_result,
             user_confirmed_count=user_confirmed_count,
         )
-        # --- COMPUTE & RENDER EXIT STRATEGY PLAYBOOK ---
-        exit_plan = evaluate_exit_and_trim_strategy(
-            cmp=current_price,
-            moat_grade=decision["moat_grade"],
-            roce_pct=metrics["roce_pct"],
-            wacc_pct=applied_r,
-            fcf_ni_pct=fcf_ni_pct,
-            de_ratio=metrics["de_ratio"],
-            qtr_status=qtr_analysis.get("turnaround_status", ""),
-    # --- CALCULATE FCF / NET INCOME RATIO FOR EXIT ENGINE ---
+  # --- CALCULATE FCF / NET INCOME RATIO FOR EXIT ENGINE ---
     fcf_ni_val = metrics.get("fcf_to_ni_ratio") or metrics.get("ocf_to_ni_ratio")
     fcf_ni_pct = round(fcf_ni_val * 100.0, 1) if fcf_ni_val is not None else 0.0
 
@@ -2930,6 +2921,15 @@ def main() -> None:
         max_single_stock_cap_pct=max_cap_input,
         replacement_irr_pct=alt_irr_input,
     )
+        # --- COMPUTE & RENDER EXIT STRATEGY PLAYBOOK ---
+        exit_plan = evaluate_exit_and_trim_strategy(
+            cmp=current_price,
+            moat_grade=decision["moat_grade"],
+            roce_pct=metrics["roce_pct"],
+            wacc_pct=applied_r,
+            fcf_ni_pct=fcf_ni_pct,
+            de_ratio=metrics["de_ratio"],
+            qtr_status=qtr_analysis.get("turnaround_status", ""),
 
             implied_g1_pct=implied_g1_pct,
             model_g1_pct=applied_g1,
