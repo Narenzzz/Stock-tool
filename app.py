@@ -2991,7 +2991,7 @@ def main() -> None:
 
 
         # RENDER DUAL-AXIS VERDICT CARD
-        st.markdown(
+    st.markdown(
             f"""
             <div style="
                 background-color: #0f172a;
@@ -3015,94 +3015,95 @@ def main() -> None:
         )
 
         # METRIC GAUGES
-        roce_val = metrics["roce_pct"] or 0.0
-        roe_val = metrics["roe_pct"] or 0.0
-        roce_roe_spread = round(roce_val - roe_val, 2)
-        fcf_ni_val = metrics.get("fcf_to_ni_ratio")
+    roce_val = metrics["roce_pct"] or 0.0
+    roe_val = metrics["roe_pct"] or 0.0
+    roce_roe_spread = round(roce_val - roe_val, 2)
+    fcf_ni_val = metrics.get("fcf_to_ni_ratio")
         fcf_ni_pct = round(fcf_ni_val * 100.0, 1) if fcf_ni_val is not None else 0.0
 
-        vg1, vg2, vg3 = st.columns(3)
-        vg1.metric("Business Moat Quality Grade", decision["moat_grade"], decision["moat_badge"])
-        vg2.metric("Valuation Price Grade", decision["val_grade"], f"PEG: {pe_peg_analysis['peg_ratio'] or 0:.2f}x | MoS: {base_res['blended_mos_pct'] or 0:.1f}%")
-        vg3.metric(
+    vg1, vg2, vg3 = st.columns(3)
+    vg1.metric("Business Moat Quality Grade", decision["moat_grade"], decision["moat_badge"])
+    vg2.metric("Valuation Price Grade", decision["val_grade"], f"PEG: {pe_peg_analysis['peg_ratio'] or 0:.2f}x | MoS: {base_res['blended_mos_pct'] or 0:.1f}%")
+    vg3.metric(
             "ROCE-to-ROE Spread",
             f"{roce_roe_spread:+.2f}%",
             "Low Financial Leverage / Pure Moat" if roce_roe_spread >= 0 else "Leverage Assisted ROE",
         )
 
-        st.markdown("#### 🔄 Automated Reverse DCF & Staggered Buy-Zone Accumulation Tranches")
+    st.markdown("#### 🔄 Automated Reverse DCF & Staggered Buy-Zone Accumulation Tranches")
         r_col1, r_col2, r_col3, r_col4 = st.columns(4)
 
-        growth_gap = round(implied_g1_pct - applied_g1, 2)
-        r_col1.metric(
+    growth_gap = round(implied_g1_pct - applied_g1, 2)
+    r_col1.metric(
             "Market-Implied Growth (Reverse DCF g₁)",
             f"{implied_g1_pct:.2f}% / yr",
             f"{growth_gap:+.2f}% vs Model ({applied_g1:.1f}%)",
             delta_color="inverse",
         )
-        r_col2.metric(
+    r_col2.metric(
             "🟢 Aggressive SIP Zone",
             f"₹{buy_zones['sip_zone'][0]:,.1f} – ₹{buy_zones['sip_zone'][1]:,.1f}",
             "Tranche 1 (Quality Anchor)",
         )
-        r_col3.metric(
+    r_col3.metric(
             "🔵 GARP Fair-Multiple Zone",
             f"₹{buy_zones['garp_zone'][0]:,.1f} – ₹{buy_zones['garp_zone'][1]:,.1f}",
             "Tranche 2 (Core Position)",
         )
-        r_col4.metric(
+    r_col4.metric(
             "🟣 Deep Value Graham Zone",
             f"₹{buy_zones['deep_value_zone'][0]:,.1f} – ₹{buy_zones['deep_value_zone'][1]:,.1f}",
             "Tranche 3 (Max Safety)",
         )
+    # SAVE SNAPSHOT ACTION SECTION
+    st.divider()
+    st.markdown("#### 💾 Save / Update Analysis to Comparison Ledger")
+    s_col1, s_col2 = st.columns([2, 1])
+    
+    with s_col1:
+        overwrite_mode = st.checkbox(
+            f"🔄 Replace existing saved entry for {target_ticker} (uncheck to log historical date snapshot)",
+            value=True,
+            key=f"overwrite_{target_ticker}",
+        )
+        
+    with s_col2:
+        if st.button("💾 Save Stock to Comparison Watchlist", use_container_width=True, type="primary"):
+            snapshot = {
+                "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "Ticker": target_ticker,
+                "Company": company_name,
+                "Moat Grade": decision["moat_grade"],
+                "Valuation Grade": decision["val_grade"],
+                "CMP (₹)": round(current_price, 2),
+                "Implied Growth Rate (g₁ %)": round(implied_g1_pct, 2),
+                "Model Growth (g₁ %)": round(applied_g1, 2),
+                "Assumed WACC (r %)": round(applied_r, 2),  
+                "Valuation Anchor Price (₹)": round(valuation_anchor_price, 2),
+                "Calculated Intrinsic Value (₹)": round(base_res["blended_intrinsic"] or base_res["dcf_intrinsic"] or 0.0, 2),
+                "ROCE-to-ROE Spread (%)": round(roce_roe_spread, 2),
+                "FCF/Net Income Ratio (%)": round(fcf_ni_pct, 2),
+                "SIP Buy Zone (₹)": f"₹{buy_zones['sip_zone'][0]:,.0f} - ₹{buy_zones['sip_zone'][1]:,.0f}",
+                "GARP Buy Zone (₹)": f"₹{buy_zones['garp_zone'][0]:,.0f} - ₹{buy_zones['garp_zone'][1]:,.0f}",
+                "Deep Value Zone (₹)": f"₹{buy_zones['deep_value_zone'][0]:,.0f} - ₹{buy_zones['deep_value_zone'][1]:,.0f}",
+                "Verdict": decision["verdict"],
+                "Exit / Holding Action": exit_plan["exit_verdict"],
+                "Thesis Kill-Switch": kill_switch_remark,
+            }
+            status_msg = upsert_stock_analysis(snapshot, replace_existing=overwrite_mode)
+            st.success(status_msg)
 
-        # SAVE SNAPSHOT ACTION SECTION
-        st.divider()
-        st.markdown("#### 💾 Save / Update Analysis to Comparison Ledger")
-        s_col1, s_col2 = st.columns([2, 1])
-        with s_col1:
-            overwrite_mode = st.checkbox(
-                f"🔄 Replace existing saved entry for {target_ticker} (uncheck to log historical date snapshot)",
-                value=True,
-                key=f"overwrite_{target_ticker}",
-            )
-        with s_col2:
-            if st.button("💾 Save Stock to Comparison Watchlist", use_container_width=True, type="primary"):
-                snapshot = {
-                    "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "Ticker": target_ticker,
-                    "Company": company_name,
-                    "Moat Grade": decision["moat_grade"],
-                    "Valuation Grade": decision["val_grade"],
-                    "CMP (₹)": round(current_price, 2),
-                    "Implied Growth Rate (g₁ %)": round(implied_g1_pct, 2),
-                    "Model Growth (g₁ %)": round(applied_g1, 2),
-  "Assumed WACC (r %)": round(applied_r, 2),  
-                    "Valuation Anchor Price (₹)": round(valuation_anchor_price, 2),
-                    "Calculated Intrinsic Value (₹)": round(base_res["blended_intrinsic"] or base_res["dcf_intrinsic"] or 0.0, 2),
-                    "ROCE-to-ROE Spread (%)": round(roce_roe_spread, 2),
-                    "FCF/Net Income Ratio (%)": round(fcf_ni_pct, 2),
-                    "SIP Buy Zone (₹)": f"₹{buy_zones['sip_zone'][0]:,.0f} - ₹{buy_zones['sip_zone'][1]:,.0f}",
-                    "GARP Buy Zone (₹)": f"₹{buy_zones['garp_zone'][0]:,.0f} - ₹{buy_zones['garp_zone'][1]:,.0f}",
-                    "Deep Value Zone (₹)": f"₹{buy_zones['deep_value_zone'][0]:,.0f} - ₹{buy_zones['deep_value_zone'][1]:,.0f}",
-                    "Verdict": decision["verdict"],
-    "Exit / Holding Action": exit_plan["exit_verdict"],        # <--- ADD THIS
-                    "Thesis Kill-Switch": kill_switch_remark,
-                }
-                status_msg = upsert_stock_analysis(snapshot, replace_existing=overwrite_mode)
-                st.success(status_msg)
-
-        # POSITIVES & RISKS
-        st.divider()
-        pos_col, risk_col = st.columns(2)
-        with pos_col:
-            st.markdown("### 🟢 Positive Points & Bullish Catalysts")
-            for pt in decision["positive_points"]:
-                st.markdown(f"- {pt}")
-        with risk_col:
-            st.markdown("### 🔴 Key Risks & Red Flags to Consider")
-            for rk in decision["risk_points"]:
-                st.markdown(f"- {rk}")
+    # POSITIVES & RISKS
+    st.divider()
+    pos_col, risk_col = st.columns(2)
+    with pos_col:
+        st.markdown("### 🟢 Positive Points & Bullish Catalysts")
+        for pt in decision["positive_points"]:
+            st.markdown(f"- {pt}")
+    with risk_col:
+        st.markdown("### 🔴 Key Risks & Red Flags to Consider")
+        for rk in decision["risk_points"]:
+            st.markdown(f"- {rk}")
 
     # --------------------------------------------------------------------------
     # TAB 2: SAVED COMPARISON WATCHLIST LEDGER
