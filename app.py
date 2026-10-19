@@ -2879,9 +2879,9 @@ def main() -> None:
 
         st.divider()
 
-        # SECTION 5: UPGRADED INSTITUTIONAL VERDICT, REVERSE DCF & BUY ZONES
-        st.header("5. Institutional Decision Engine & Staggered Buy Zones")
-        news_summary = analyze_corporate_news(bundle["raw_news"], max_items=7)
+    # SECTION 5: UPGRADED INSTITUTIONAL VERDICT, REVERSE DCF & BUY ZONES
+    st.header("5. Institutional Decision Engine & Staggered Buy Zones")
+    news_summary = analyze_corporate_news(bundle["raw_news"], max_items=7)
 
     decision = compute_decision_verdict(
         ticker=target_ticker,
@@ -2902,7 +2902,7 @@ def main() -> None:
     fcf_ni_val = metrics.get("fcf_to_ni_ratio") or metrics.get("ocf_to_ni_ratio")
     fcf_ni_pct = round(fcf_ni_val * 100.0, 1) if fcf_ni_val is not None else 0.0
 
-    # --- NOW CALL THE EXIT STRATEGY ENGINE SAFELY ---
+    # --- COMPUTE & RENDER EXIT STRATEGY PLAYBOOK ---
     exit_plan = evaluate_exit_and_trim_strategy(
         cmp=current_price,
         moat_grade=decision["moat_grade"],
@@ -2923,71 +2923,48 @@ def main() -> None:
         replacement_irr_pct=alt_irr_input,
     )
 
-        # --- COMPUTE & RENDER EXIT STRATEGY PLAYBOOK ---
-        exit_plan = evaluate_exit_and_trim_strategy(
-            cmp=current_price,
-            moat_grade=decision["moat_grade"],
-            roce_pct=metrics["roce_pct"],
-            wacc_pct=applied_r,
-            fcf_ni_pct=fcf_ni_pct,
-            de_ratio=metrics["de_ratio"],
-            qtr_status=qtr_analysis.get("turnaround_status", ""),
+    st.markdown("#### 🎯 Automated Exit Strategy & Position Management Playbook (For Existing Holders)")
+    st.markdown(
+        f"""
+        <div style="
+            background-color: #1e293b;
+            border-left: 8px solid {exit_plan['exit_color']};
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin-bottom: 14px;
+        ">
+            <h4 style="color: {exit_plan['exit_color']}; margin: 0 0 6px 0;">
+                {exit_plan['exit_verdict']}
+            </h4>
+            <span style="color: #94a3b8; font-size: 0.90rem;">
+                • <b>Est. Holding 5-Yr IRR:</b> <code>{exit_plan['est_holding_irr']:.1f}%/yr</code> &nbsp;|&nbsp;
+                • <b>Alternative Idea Spread:</b> <code>{exit_plan['irr_spread']:+.1f}%/yr</code> (Hurdle >= +8.0% for 12.5% LTCG) &nbsp;|&nbsp;
+                • <b>Your Allocation:</b> <code>{current_weight_input:.1f}%</code> (Cap: {max_cap_input:.1f}%)
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-            implied_g1_pct=implied_g1_pct,
-            model_g1_pct=applied_g1,
-            peg_ratio=pe_peg_analysis.get("peg_ratio"),
-            rev_yoy_pct=metrics["rev_growth"]["recent_yoy_pct"],
-            blended_mos_pct=base_res["blended_mos_pct"],
-            roce_applicable=profile["roce_applicable"],
-            de_applicable=profile["de_applicable"],
-            current_portfolio_weight_pct=current_weight_input,
-            max_single_stock_cap_pct=max_cap_input,
-            replacement_irr_pct=alt_irr_input,
-        )
+    ex_col1, ex_col2 = st.columns(2)
+    with ex_col1:
+        st.markdown("**🔍 Diagnostic Trigger Audit:**")
+        for tf in exit_plan["triggers_fired"]:
+            st.markdown(f"- {tf}")
+    with ex_col2:
+        st.markdown("**📋 Anti-Regret Tranche Execution Plan:**")
+        for tp in exit_plan["tranche_plan"]:
+            st.markdown(f"- {tp}")
 
-        st.markdown("#### 🎯 Automated Exit Strategy & Position Management Playbook (For Existing Holders)")
-        st.markdown(
-            f"""
-            <div style="
-                background-color: #1e293b;
-                border-left: 8px solid {exit_plan['exit_color']};
-                padding: 16px 20px;
-                border-radius: 8px;
-                margin-bottom: 14px;
-            ">
-                <h4 style="color: {exit_plan['exit_color']}; margin: 0 0 6px 0;">
-                    {exit_plan['exit_verdict']}
-                </h4>
-                <span style="color: #94a3b8; font-size: 0.90rem;">
-                    • <b>Est. Holding 5-Yr IRR:</b> <code>{exit_plan['est_holding_irr']:.1f}%/yr</code> &nbsp;|&nbsp;
-                    • <b>Alternative Idea Spread:</b> <code>{exit_plan['irr_spread']:+.1f}%/yr</code> (Hurdle >= +8.0% for 12.5% LTCG) &nbsp;|&nbsp;
-                    • <b>Your Allocation:</b> <code>{current_weight_input:.1f}%</code> (Cap: {max_cap_input:.1f}%)
-                </span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        ex_col1, ex_col2 = st.columns(2)
-        with ex_col1:
-            st.markdown("**🔍 Diagnostic Trigger Audit:**")
-            for tf in exit_plan["triggers_fired"]:
-                st.markdown(f"- {tf}")
-        with ex_col2:
-            st.markdown("**📋 Anti-Regret Tranche Execution Plan:**")
-            for tp in exit_plan["tranche_plan"]:
-                st.markdown(f"- {tp}")
-
-        # AUTO-SUGGEST DEFAULT KILL-SWITCH REMARK FOR THIS STOCK
-        default_ks = (
-            f"Exit 100% if ROCE drops below {applied_r:.1f}% (WACC), "
-            f"FCF/PAT falls < 45%, or D/E exceeds 1.0x"
-        )
-        kill_switch_remark = st.text_input(
-            "🛡️ Thesis Invalidation Kill-Switch (Auto-generated or customize before saving to Tab 2):",
-            value=default_ks,
-            key=f"ks_input_{target_ticker}",
-        )
+    default_ks = (
+        f"Exit 100% if ROCE drops below {applied_r:.1f}% (WACC), "
+        f"FCF/PAT falls < 45%, or D/E exceeds 1.0x"
+    )
+    kill_switch_remark = st.text_input(
+        "🛡️ Thesis Invalidation Kill-Switch (Auto-generated or customize before saving to Tab 2):",
+        value=default_ks,
+        key=f"ks_input_{target_ticker}",
+    )
 
         # REVERSE DCF & BUY ZONES COMPUTATION
         fcf_per_share_calc = (dcf_inputs["fcf_0"] / dcf_inputs["shares"]) if (dcf_inputs["fcf_0"] and dcf_inputs["shares"] and dcf_inputs["shares"] > 0) else (dcf_inputs["eps_ttm"] or 1.0)
