@@ -2883,25 +2883,26 @@ def main() -> None:
         st.header("5. Institutional Decision Engine & Staggered Buy Zones")
         news_summary = analyze_corporate_news(bundle["raw_news"], max_items=7)
 
-        decision = compute_decision_verdict(
-            ticker=target_ticker,
-            company_name=company_name,
-            current_price=current_price,
-            profile=profile,
-            metrics=metrics,
-            qtr_analysis=qtr_analysis,
-            pe_peg_analysis=pe_peg_analysis,
-            peer_medians=peer_medians,
-            scenarios=scenarios,
-            news_summary=news_summary,
-            checklist_result=checklist_result,
-            user_confirmed_count=user_confirmed_count,
-        )
-  # --- CALCULATE FCF / NET INCOME RATIO FOR EXIT ENGINE ---
+    decision = compute_decision_verdict(
+        ticker=target_ticker,
+        company_name=company_name,
+        current_price=current_price,
+        profile=profile,
+        metrics=metrics,
+        qtr_analysis=qtr_analysis,
+        pe_peg_analysis=pe_peg_analysis,
+        peer_medians=peer_medians,
+        scenarios=scenarios,
+        news_summary=news_summary,
+        checklist_result=checklist_result,
+        user_confirmed_count=user_confirmed_count,
+    )
+
+    # --- CALCULATE FCF / NET INCOME RATIO AS A STANDALONE STATEMENT ---
     fcf_ni_val = metrics.get("fcf_to_ni_ratio") or metrics.get("ocf_to_ni_ratio")
     fcf_ni_pct = round(fcf_ni_val * 100.0, 1) if fcf_ni_val is not None else 0.0
 
-    # --- COMPUTE & RENDER EXIT STRATEGY PLAYBOOK ---
+    # --- NOW CALL THE EXIT STRATEGY ENGINE SAFELY ---
     exit_plan = evaluate_exit_and_trim_strategy(
         cmp=current_price,
         moat_grade=decision["moat_grade"],
@@ -2921,6 +2922,7 @@ def main() -> None:
         max_single_stock_cap_pct=max_cap_input,
         replacement_irr_pct=alt_irr_input,
     )
+
         # --- COMPUTE & RENDER EXIT STRATEGY PLAYBOOK ---
         exit_plan = evaluate_exit_and_trim_strategy(
             cmp=current_price,
