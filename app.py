@@ -211,6 +211,151 @@ def calculate_reverse_dcf_growth(
 
     return round(((low + high) / 2.0) * 100.0, 2)
 
+# ==============================================================================
+# 2B. AUTOMATED INSTITUTIONAL EXIT & POSITION SIZING ENGINE
+# ==============================================================================
+def evaluate_exit_and_trim_strategy(
+    cmp: float,
+    moat_grade: str,
+    roce_pct: Optional[float],
+    wacc_pct: float,
+    fcf_ni_pct: float,
+    de_ratio: Optional[float],
+    qtr_status: str,
+    implied_g1_pct: float,
+    model_g1_pct: float,
+    peg_ratio: Optional[float],
+    rev_yoy_pct: Optional[float],
+    blended_mos_pct: Optional[float],
+    roce_applicable: bool = True,
+    de_applicable: bool = True,
+    current_portfolio_weight_pct: float = 5.0,
+    max_single_stock_cap_pct: float = 15.0,
+    replacement_irr_pct: float = 15.0,
+) -> Dict[str, Any]:
+    """
+    Evaluates the 4 Institutional Selling Triggers:
+      1. Structural Thesis Invalidation (Kill-Switch Breach) -> 100% Full Exit
+      2. Valuation Euphoria (Reverse DCF / PEG Bubble)       -> 30% to 50% Staggered Trim
+      3. Portfolio Concentration Breach (>15-20% Cap)        -> Rebalance Excess Weight
+      4. Post-Tax Opportunity Cost (12.5% LTCG Hurdle)       -> Capital Rotation Swap
+    """
+    triggers_fired: List[str] = []
+    tranche_plan: List[str] = []
+
+    # --- TRIGGER 1: STRUCTURAL THESIS INVALIDATION (100% EXIT) ---
+    roce_breach = (
+        roce_applicable
+        and roce_pct is not None
+        and roce_pct < (wacc_pct - 1.0)
+    )
+    fcf_breach = fcf_ni_pct != 0.0 and fcf_ni_pct < 45.0
+    debt_spike = de_applicable and de_ratio is not None and de_ratio > 1.50
+    severe_qtr_decay = "CONTRACTION" in qtr_status and moat_grade in ["C", "D"]
+
+    thesis_broken = (roce_breach and fcf_breach) or debt_spike or severe_qtr_decay or moat_grade == "D"
+
+    # --- TRIGGER 2: EXTREME VALUATION EUPHORIA (30%-50% TRIM) ---
+    growth_expectation_gap = implied_g1_pct - model_g1_pct
+    valuation_bubble = (
+        implied_g1_pct >= 35.0
+        or growth_expectation_gap >= 18.0
+        or (peg_ratio is not None and peg_ratio >= 3.5 and (rev_yoy_pct is None or rev_yoy_pct < 12.0))
+    )
+
+    # --- TRIGGER 3: PORTFOLIO CONCENTRATION CEILING ---
+    concentration_excess_pct = max(0.0, round(current_portfolio_weight_pct - max_single_stock_cap_pct, 2))
+    concentration_breach = concentration_excess_pct > 0.0
+
+    # --- TRIGGER 4: RELATIVE OPPORTUNITY COST (AFTER 12.5% LTCG TAX FRICTION) ---
+    # Estimate prospective 5-Yr stock IRR = Model Growth + annualized MoS mean-reversion
+    mos_clamped = max(-50.0, min(50.0, blended_mos_pct or 0.0))
+    est_holding_irr = round(model_g1_pct + (mos_clamped * 0.18), 2)
+    # Require >= 8.0% IRR upgrade spread to justify paying 12.5% LTCG tax + reinvestment risk
+    irr_spread = round(replacement_irr_pct - est_holding_irr, 2)
+    opportunity_cost_breach = irr_spread >= 8.0 and moat_grade not in ["A+"]
+
+    # --- DECISION HIERARCHY ---
+    if thesis_broken:
+        exit_verdict = "🚨 TRIGGER 1: STRUCTURAL THESIS BREACH — FULL EXIT (SELL 100%)"
+        exit_color = "#dc2626"  # Crimson Red
+        if roce_breach:
+            triggers_fired.append(f"Capital Efficiency Failure: ROCE ({roce_pct:.1f}%) dropped below WACC ({wacc_pct:.1f}%).")
+        if fcf_breach:
+            triggers_fired.append(f"Cash Conversion Breakdown: FCF/Net Income ({fcf_ni_pct:.1f}%) is below the 45% safety floor.")
+        if debt_spike:
+            triggers_fired.append(f"Balance Sheet Stress: Debt-to-Equity ({de_ratio:.2f}x) crossed the 1.50x danger threshold.")
+        if severe_qtr_decay or moat_grade == "D":
+            triggers_fired.append(f"Moat Deterioration: Business Moat Grade fell to '{moat_grade}' alongside quarterly earnings pressure.")
+
+        tranche_plan = [
+            "Tranche 1 (Immediate): Liquidate 50%–100% of position at market price—do not wait for a bounce.",
+            "Tranche 2 (Within 3–5 Days): Exit any remaining shares and reallocate cash to A+/A watchlisted compounders.",
+        ]
+
+    elif valuation_bubble:
+        exit_verdict = "✂️ TRIGGER 2: VALUATION EUPHORIA — TRIM 30% TO 50% (LOCK MULTI-YEAR GAINS)"
+        exit_color = "#f59e0b"  # Amber
+        triggers_fired.append(
+            f"Reverse DCF Euphoria: CMP (₹{cmp:,.1f}) prices in {implied_g1_pct:.1f}%/yr growth for 10 years "
+            f"(+{growth_expectation_gap:.1f}% above realistic model g₁ of {model_g1_pct:.1f}%)."
+        )
+        if peg_ratio is not None and peg_ratio >= 3.0:
+            triggers_fired.append(f"Multiple Stretch: PEG ratio is {peg_ratio:.2f}x, pulling forward 3–5 years of future returns.")
+
+        tranche_plan = [
+            f"Tranche 1 (Sell 1/3rd Now @ ~₹{cmp:,.0f}): Take initial capital / froth off the table while keeping core compounder exposure.",
+            "Tranche 2 (Sell 1/3rd on QoQ Deceleration): Trim second slice only if quarterly OPM or YoY revenue growth slows.",
+            "Tranche 3 (Core Runner - Hold 1/3rd+): Never sell the final core of an A+/A business unless Trigger 1 (Kill-Switch) fires.",
+        ]
+
+    elif concentration_breach:
+        exit_verdict = f"⚖️ TRIGGER 3: CONCENTRATION CAP BREACH — REBALANCE ({concentration_excess_pct:.1f}% EXCESS)"
+        exit_color = "#a855f7"  # Purple
+        triggers_fired.append(
+            f"Single-Stock Weight ({current_portfolio_weight_pct:.1f}%) exceeds your {max_single_stock_cap_pct:.1f}% risk parity ceiling."
+        )
+        trim_share_pct = round((concentration_excess_pct / current_portfolio_weight_pct) * 100.0, 1)
+        tranche_plan = [
+            f"Portfolio Rebalance Action: Trim ~{trim_share_pct:.1f}% of your current shares in this stock to bring weight back down to {max_single_stock_cap_pct - 2.0:.1f}%.",
+            "Core Retention: Keep the remaining position untouched to continue compounding.",
+        ]
+
+    elif opportunity_cost_breach:
+        exit_verdict = f"🔄 TRIGGER 4: OPPORTUNITY COST DRAG — ROTATE CAPITAL (+{irr_spread:.1f}% IRR UPGRADE)"
+        exit_color = "#0ea5e9"  # Sky Blue
+        triggers_fired.append(
+            f"Prospective 5-Yr IRR ({est_holding_irr:.1f}%/yr) trails your best replacement idea ({replacement_irr_pct:.1f}%/yr) "
+            f"by {irr_spread:+.1f}%/yr—clearing the 8% hurdle required to absorb 12.5% LTCG tax."
+        )
+        tranche_plan = [
+            "Tranche 1 (Swap 50%): Liquidate half of this stagnant holding to fund Tranche 1 & 2 of your higher-IRR target.",
+            "Tranche 2 (Swap Remaining 50%): Rotate the second half once the new stock confirms quarterly execution.",
+        ]
+
+    else:
+        exit_verdict = "🛡️ NO SELL TRIGGERS ACTIVE — HOLD CORE & LET IT COMPOUND"
+        exit_color = "#10b981"  # Emerald Green
+        triggers_fired.append(
+            f"Thesis Intact: Moat Grade ({moat_grade}), ROCE ({roce_pct or 0:.1f}%), and Implied Growth ({implied_g1_pct:.1f}%) are within healthy bounds."
+        )
+        triggers_fired.append(
+            f"Prospective Holding IRR (~{est_holding_irr:.1f}%/yr) does not warrant paying 12.5% LTCG tax to switch."
+        )
+        tranche_plan = [
+            "Action: Do nothing. Sit tight and let compounding work without unnecessary tax friction.",
+            "Add on Pullbacks: Use the Staggered Buy Zones above if the stock dips during market corrections.",
+        ]
+
+    return {
+        "exit_verdict": exit_verdict,
+        "exit_color": exit_color,
+        "triggers_fired": triggers_fired,
+        "tranche_plan": tranche_plan,
+        "est_holding_irr": est_holding_irr,
+        "irr_spread": irr_spread,
+        "thesis_broken": thesis_broken,
+    }
 
 def calculate_staggered_buy_zones(
     cmp: float,
@@ -2347,6 +2492,22 @@ def main() -> None:
             min_value=2.0, max_value=6.0, value=4.0, step=0.25,
             disabled=not use_custom_params,
         )
+        st.markdown("---")
+        st.subheader("🛡️ Exit Strategy & Sizing Rules")
+        current_weight_input = st.slider(
+            "Your Current Portfolio Weight in This Stock (%)",
+            min_value=0.0, max_value=40.0, value=6.0, step=0.5,
+            help="If this stock grows beyond your Max Cap, Trigger 3 (Rebalance) will alert you to trim excess."
+        )
+        max_cap_input = st.slider(
+            "Hard Single-Stock Concentration Cap (%)",
+            min_value=10.0, max_value=25.0, value=15.0, step=1.0,
+        )
+        alt_irr_input = st.slider(
+            "Best Alternative Watchlist Idea IRR (%)",
+            min_value=10.0, max_value=30.0, value=16.0, step=0.5,
+            help="Used for Trigger 4: Checks if an alternative stock beats this holding by >= 8%/yr (to overcome 12.5% LTCG tax)."
+        )
 
         st.markdown("---")
         st.subheader("🏢 Peer Benchmark & CSV")
@@ -2736,6 +2897,70 @@ def main() -> None:
             checklist_result=checklist_result,
             user_confirmed_count=user_confirmed_count,
         )
+        # --- COMPUTE & RENDER EXIT STRATEGY PLAYBOOK ---
+        exit_plan = evaluate_exit_and_trim_strategy(
+            cmp=current_price,
+            moat_grade=decision["moat_grade"],
+            roce_pct=metrics["roce_pct"],
+            wacc_pct=applied_r,
+            fcf_ni_pct=fcf_ni_pct,
+            de_ratio=metrics["de_ratio"],
+            qtr_status=qtr_analysis.get("turnaround_status", ""),
+            implied_g1_pct=implied_g1_pct,
+            model_g1_pct=applied_g1,
+            peg_ratio=pe_peg_analysis.get("peg_ratio"),
+            rev_yoy_pct=metrics["rev_growth"]["recent_yoy_pct"],
+            blended_mos_pct=base_res["blended_mos_pct"],
+            roce_applicable=profile["roce_applicable"],
+            de_applicable=profile["de_applicable"],
+            current_portfolio_weight_pct=current_weight_input,
+            max_single_stock_cap_pct=max_cap_input,
+            replacement_irr_pct=alt_irr_input,
+        )
+
+        st.markdown("#### 🎯 Automated Exit Strategy & Position Management Playbook (For Existing Holders)")
+        st.markdown(
+            f"""
+            <div style="
+                background-color: #1e293b;
+                border-left: 8px solid {exit_plan['exit_color']};
+                padding: 16px 20px;
+                border-radius: 8px;
+                margin-bottom: 14px;
+            ">
+                <h4 style="color: {exit_plan['exit_color']}; margin: 0 0 6px 0;">
+                    {exit_plan['exit_verdict']}
+                </h4>
+                <span style="color: #94a3b8; font-size: 0.90rem;">
+                    • <b>Est. Holding 5-Yr IRR:</b> <code>{exit_plan['est_holding_irr']:.1f}%/yr</code> &nbsp;|&nbsp;
+                    • <b>Alternative Idea Spread:</b> <code>{exit_plan['irr_spread']:+.1f}%/yr</code> (Hurdle >= +8.0% for 12.5% LTCG) &nbsp;|&nbsp;
+                    • <b>Your Allocation:</b> <code>{current_weight_input:.1f}%</code> (Cap: {max_cap_input:.1f}%)
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        ex_col1, ex_col2 = st.columns(2)
+        with ex_col1:
+            st.markdown("**🔍 Diagnostic Trigger Audit:**")
+            for tf in exit_plan["triggers_fired"]:
+                st.markdown(f"- {tf}")
+        with ex_col2:
+            st.markdown("**📋 Anti-Regret Tranche Execution Plan:**")
+            for tp in exit_plan["tranche_plan"]:
+                st.markdown(f"- {tp}")
+
+        # AUTO-SUGGEST DEFAULT KILL-SWITCH REMARK FOR THIS STOCK
+        default_ks = (
+            f"Exit 100% if ROCE drops below {applied_r:.1f}% (WACC), "
+            f"FCF/PAT falls < 45%, or D/E exceeds 1.0x"
+        )
+        kill_switch_remark = st.text_input(
+            "🛡️ Thesis Invalidation Kill-Switch (Auto-generated or customize before saving to Tab 2):",
+            value=default_ks,
+            key=f"ks_input_{target_ticker}",
+        )
 
         # REVERSE DCF & BUY ZONES COMPUTATION
         fcf_per_share_calc = (dcf_inputs["fcf_0"] / dcf_inputs["shares"]) if (dcf_inputs["fcf_0"] and dcf_inputs["shares"] and dcf_inputs["shares"] > 0) else (dcf_inputs["eps_ttm"] or 1.0)
@@ -2847,6 +3072,7 @@ def main() -> None:
                     "CMP (₹)": round(current_price, 2),
                     "Implied Growth Rate (g₁ %)": round(implied_g1_pct, 2),
                     "Model Growth (g₁ %)": round(applied_g1, 2),
+  "Assumed WACC (r %)": round(applied_r, 2),  
                     "Valuation Anchor Price (₹)": round(valuation_anchor_price, 2),
                     "Calculated Intrinsic Value (₹)": round(base_res["blended_intrinsic"] or base_res["dcf_intrinsic"] or 0.0, 2),
                     "ROCE-to-ROE Spread (%)": round(roce_roe_spread, 2),
@@ -2855,6 +3081,8 @@ def main() -> None:
                     "GARP Buy Zone (₹)": f"₹{buy_zones['garp_zone'][0]:,.0f} - ₹{buy_zones['garp_zone'][1]:,.0f}",
                     "Deep Value Zone (₹)": f"₹{buy_zones['deep_value_zone'][0]:,.0f} - ₹{buy_zones['deep_value_zone'][1]:,.0f}",
                     "Verdict": decision["verdict"],
+    "Exit / Holding Action": exit_plan["exit_verdict"],        # <--- ADD THIS
+                    "Thesis Kill-Switch": kill_switch_remark,
                 }
                 status_msg = upsert_stock_analysis(snapshot, replace_existing=overwrite_mode)
                 st.success(status_msg)
@@ -2893,10 +3121,13 @@ def main() -> None:
                 "Moat Grade",
                 "CMP (₹)",
                 "Implied Growth Rate (g₁ %)",
+  "Assumed WACC (r %)", 
                 "Valuation Anchor Price (₹)",
                 "Calculated Intrinsic Value (₹)",
                 "ROCE-to-ROE Spread (%)",
                 "FCF/Net Income Ratio (%)",
+    "Exit / Holding Action",             # <--- ADD THIS
+                "Thesis Kill-Switch", 
                 "SIP Buy Zone (₹)",
                 "GARP Buy Zone (₹)",
                 "Deep Value Zone (₹)",
