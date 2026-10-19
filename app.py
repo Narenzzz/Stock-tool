@@ -2966,9 +2966,18 @@ def main() -> None:
         key=f"ks_input_{target_ticker}",
     )
 
+
         # REVERSE DCF & BUY ZONES COMPUTATION
-        fcf_per_share_calc = (dcf_inputs["fcf_0"] / dcf_inputs["shares"]) if (dcf_inputs["fcf_0"] and dcf_inputs["shares"] and dcf_inputs["shares"] > 0) else (dcf_inputs["eps_ttm"] or 1.0)
-        net_cash_per_share = ((dcf_inputs["total_cash"] - dcf_inputs["total_debt"]) / dcf_inputs["shares"]) if (dcf_inputs["shares"] and dcf_inputs["shares"] > 0) else 0.0
+        fcf_per_share_calc = (
+            (dcf_inputs["fcf_0"] / dcf_inputs["shares"]) 
+            if (dcf_inputs["fcf_0"] and dcf_inputs["shares"] and dcf_inputs["shares"] > 0) 
+            else (dcf_inputs["eps_ttm"] or 1.0)
+        )
+        net_cash_per_share = (
+            (dcf_inputs["total_cash"] - dcf_inputs["total_debt"]) / dcf_inputs["shares"]
+            if (dcf_inputs["shares"] and dcf_inputs["shares"] > 0) 
+            else 0.0
+        )
 
         implied_g1_pct = calculate_reverse_dcf_growth(
             cmp=current_price,
@@ -2988,6 +2997,7 @@ def main() -> None:
             moat_grade=decision["moat_grade"],
         )
         valuation_anchor_price = buy_zones["valuation_anchor"]
+
 
         # RENDER DUAL-AXIS VERDICT CARD
         st.markdown(
