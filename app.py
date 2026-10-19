@@ -3097,13 +3097,13 @@ def main() -> None:
     st.divider()
     pos_col, risk_col = st.columns(2)
     with pos_col:
-    st.markdown("### 🟢 Positive Points & Bullish Catalysts")
-    for pt in decision["positive_points"]:
-    st.markdown(f"- {pt}")
+        st.markdown("### 🟢 Positive Points & Bullish Catalysts")
+        for pt in decision["positive_points"]:
+            st.markdown(f"- {pt}")
     with risk_col:
-    st.markdown("### 🔴 Key Risks & Red Flags to Consider")
-    for rk in decision["risk_points"]:
-    st.markdown(f"- {rk}")
+        st.markdown("### 🔴 Key Risks & Red Flags to Consider")
+        for rk in decision["risk_points"]:
+            st.markdown(f"- {rk}")
 
     # --------------------------------------------------------------------------
     # TAB 2: SAVED COMPARISON WATCHLIST LEDGER
