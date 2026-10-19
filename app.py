@@ -3019,7 +3019,7 @@ def main() -> None:
     roe_val = metrics["roe_pct"] or 0.0
     roce_roe_spread = round(roce_val - roe_val, 2)
     fcf_ni_val = metrics.get("fcf_to_ni_ratio")
-        fcf_ni_pct = round(fcf_ni_val * 100.0, 1) if fcf_ni_val is not None else 0.0
+    fcf_ni_pct = round(fcf_ni_val * 100.0, 1) if fcf_ni_val is not None else 0.0
 
     vg1, vg2, vg3 = st.columns(3)
     vg1.metric("Business Moat Quality Grade", decision["moat_grade"], decision["moat_badge"])
@@ -3031,7 +3031,7 @@ def main() -> None:
         )
 
     st.markdown("#### 🔄 Automated Reverse DCF & Staggered Buy-Zone Accumulation Tranches")
-        r_col1, r_col2, r_col3, r_col4 = st.columns(4)
+    r_col1, r_col2, r_col3, r_col4 = st.columns(4)
 
     growth_gap = round(implied_g1_pct - applied_g1, 2)
     r_col1.metric(
@@ -3097,13 +3097,13 @@ def main() -> None:
     st.divider()
     pos_col, risk_col = st.columns(2)
     with pos_col:
-        st.markdown("### 🟢 Positive Points & Bullish Catalysts")
-        for pt in decision["positive_points"]:
-            st.markdown(f"- {pt}")
+    st.markdown("### 🟢 Positive Points & Bullish Catalysts")
+    for pt in decision["positive_points"]:
+    st.markdown(f"- {pt}")
     with risk_col:
-        st.markdown("### 🔴 Key Risks & Red Flags to Consider")
-        for rk in decision["risk_points"]:
-            st.markdown(f"- {rk}")
+    st.markdown("### 🔴 Key Risks & Red Flags to Consider")
+    for rk in decision["risk_points"]:
+    st.markdown(f"- {rk}")
 
     # --------------------------------------------------------------------------
     # TAB 2: SAVED COMPARISON WATCHLIST LEDGER
