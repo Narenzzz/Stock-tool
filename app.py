@@ -3209,7 +3209,6 @@ def main() -> None:
                     reset_entire_watchlist()
                     st.success("Watchlist wiped clean.")
                     st.rerun()
-
             # --- 📂 UPLOAD / RESTORE WATCHLIST FROM CSV ---
             st.divider()
             st.write("### 🔄 Restore Watchlist from CSV")
@@ -3224,13 +3223,17 @@ def main() -> None:
                     # Read uploaded CSV into DataFrame
                     imported_df = pd.read_csv(uploaded_csv)
                     
-                    # Convert DataFrame back to a list of dictionaries (records)
-                    imported_records = imported_df.to_dict(orient="records")
+                    # Clean up/replace NaN values with empty strings or defaults so it doesn't break
+                    imported_df = imported_df.fillna("")
                     
-                    # Save to your app's disk storage function
-                    save_watchlist_to_disk(imported_records)
+                    # Convert DataFrame records back to dictionaries
+                    restored_records = imported_df.to_dict(orient="records")
                     
-                    st.success("✅ Watchlist successfully restored and updated from your CSV file!")
+                    # Save directly using your watchlist storage function
+                    save_watchlist_to_disk(restored_records)
+                    
+                    st.success("✅ Watchlist successfully restored! Reloading app...")
+                    # Force a complete rerun so session state clears and reloads from disk
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ Error processing uploaded CSV file: {e}")
