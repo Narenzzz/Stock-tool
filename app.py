@@ -3210,6 +3210,31 @@ def main() -> None:
                     st.success("Watchlist wiped clean.")
                     st.rerun()
 
+            # --- 📂 UPLOAD / RESTORE WATCHLIST FROM CSV ---
+            st.divider()
+            st.write("### 🔄 Restore Watchlist from CSV")
+            uploaded_csv = st.file_uploader(
+                "Upload your previously exported stock comparison CSV file:",
+                type=["csv"],
+                key="watchlist_csv_upload"
+            )
+
+            if uploaded_csv is not None:
+                try:
+                    # Read uploaded CSV into DataFrame
+                    imported_df = pd.read_csv(uploaded_csv)
+                    
+                    # Convert DataFrame back to a list of dictionaries (records)
+                    imported_records = imported_df.to_dict(orient="records")
+                    
+                    # Save to your app's disk storage function
+                    save_watchlist_to_disk(imported_records)
+                    
+                    st.success("✅ Watchlist successfully restored and updated from your CSV file!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Error processing uploaded CSV file: {e}")
+
 
 if __name__ == "__main__":
     main()
