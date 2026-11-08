@@ -1152,7 +1152,32 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     if eps_s is not None and not eps_s.dropna().empty:
         latest_stmt_eps = safe_float(eps_s.dropna().iloc[0])
 
-    pe_ratio = safe_float(info.get("trailingPE")) or scr_ratios.get("pe") or safe_float(info.get("forwardPE"))
+    # ---- P/E reconciliation: never trust a single feed (Yahoo EPS is often stale / un-split-adjusted) ----
+    _px = bundle["current_price"]
+    ttm_eps_scr = None
+    _q_eps_row = get_statement_row(scr.get("quarters_df", pd.DataFrame()), ["EPS in Rs", "EPS"])
+    if _q_eps_row is not None:
+        _last4 = [safe_float(v) for v in list(_q_eps_row.values)[-4:]]
+        if len(_last4) == 4 and all(v is not None for v in _last4):
+            ttm_eps_scr = float(sum(_last4))          # sum of the last 4 reported quarters
+    _y_pe, _y_eps = safe_float(info.get("trailingPE")), safe_float(info.get("trailingEps"))
+    pe_sources: Dict[str, float] = {}
+    if scr_ratios.get("pe") and scr_ratios["pe"] > 0:
+        pe_sources["Screener.in P/E"] = float(scr_ratios["pe"])
+    if ttm_eps_scr and ttm_eps_scr > 0:
+        pe_sources["Price / Screener 4-quarter EPS"] = _px / ttm_eps_scr
+    if _y_pe and _y_pe > 0:
+        pe_sources["Yahoo trailing P/E"] = _y_pe
+    if _y_eps and _y_eps > 0:
+        pe_sources["Price / Yahoo trailing EPS"] = _px / _y_eps
+
+    _scr_vals = [v for k, v in pe_sources.items() if "Screener" in k]
+    _yah_vals = [v for k, v in pe_sources.items() if "Yahoo" in k]
+    pe_ratio = (_scr_vals[0] if _scr_vals else (_yah_vals[0] if _yah_vals else None))   # Screener-first
+    _all = list(pe_sources.values())
+    pe_disagree = len(_all) >= 2 and (max(_all) / min(_all) > 1.35)
+    if pe_ratio is None:
+        pe_ratio = safe_float(info.get("forwardPE"))
     if pe_ratio is None and latest_stmt_eps and latest_stmt_eps > 0:
         pe_ratio = bundle["current_price"] / latest_stmt_eps
     forward_pe = safe_float(info.get("forwardPE"))
@@ -1330,6 +1355,8 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "buyback_detected": buyback_detected,
         "buyback_verdict": buyback_verdict,
         "buyback_explanation": buyback_explanation,
+        "pe_sources": pe_sources,
+        "pe_disagree": pe_disagree,
         "assumed_fields": sorted(set(assumed)),
     }
 
@@ -1801,6 +1828,8 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
             assumed_dcf.append("free cash flow (proxied as 85% of net profit)")
 
     eps_ttm = safe_float(info.get("trailingEps")) or metrics.get("latest_stmt_eps") or safe_float(info.get("forwardEps"))
+    if metrics.get("pe_disagree") and metrics.get("pe_ratio") and metrics["pe_ratio"] > 0:
+        eps_ttm = current_price / metrics["pe_ratio"]   # keep Graham / fair-P/E / buy zones consistent with the reconciled P/E
     if (eps_ttm is None or eps_ttm <= 0) and metrics.get("latest_ni") and shares and shares > 0:
         if metrics["latest_ni"] > 0:
             eps_ttm = metrics["latest_ni"] / shares
@@ -2735,6 +2764,20 @@ def main() -> None:
                 + "; ".join(_assumed)
                 + ". Treat the verdict with extra caution."
             )
+        if metrics.get("pe_sources"):
+            if metrics.get("pe_disagree"):
+                st.warning(
+                    "**P/E data feeds disagree** - "
+                    + ", ".join(f"{k}: {v:.1f}x" for k, v in metrics["pe_sources"].items())
+                    + f". The app is using **{metrics['pe_ratio']:.1f}x** (Screener-first). "
+                    "Verify against the latest results before relying on the verdict."
+                )
+            with st.expander("P/E source reconciliation (diagnostics)", expanded=False):
+                st.dataframe(
+                    pd.DataFrame({"Source": list(metrics["pe_sources"].keys()),
+                                  "P/E (x)": [round(v, 2) for v in metrics["pe_sources"].values()]}).set_index("Source"),
+                    use_container_width=True,
+                )
 
         if uploaded_csv is not None:
             try:
