@@ -19,12 +19,16 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 # ==============================================================================
 st.set_page_config(
     page_title="Indian Equity Institutional Value, P/E-PEG & DCF Analyzer",
-    page_icon="🇮🇳",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 WATCHLIST_FILE = "saved_stock_analysis.json"
+
+# Points (out of 100) given to VADER headline sentiment. Set to 30.0 to restore the original weighting.
+# Value investors usually want fundamentals to dominate, and VADER is not finance-tuned.
+SENTIMENT_WEIGHT_PTS = 10.0
 
 INDIAN_PRESETS = {
     "CGPOWER.NS": "CG Power and Industrial Solutions Ltd (Capital Goods / Electricals)",
@@ -154,11 +158,11 @@ def upsert_stock_analysis(record: dict, replace_existing: bool = True) -> str:
             if item.get("Ticker") == ticker:
                 data[idx] = record
                 save_watchlist_to_disk(data)
-                return f"🔄 Replaced previous saved snapshot for **{ticker}** ({record['Date']})."
+                return f"Replaced previous saved snapshot for **{ticker}** ({record['Date']})."
 
     data.insert(0, record)
     save_watchlist_to_disk(data)
-    return f"✅ Saved **{ticker}** to Comparison Watchlist ({record['Date']})."
+    return f"Saved **{ticker}** to Comparison Watchlist ({record['Date']})."
 
 
 def reset_entire_watchlist():
@@ -277,7 +281,7 @@ def evaluate_exit_and_trim_strategy(
 
     # --- DECISION HIERARCHY ---
     if thesis_broken:
-        exit_verdict = "🚨 TRIGGER 1: STRUCTURAL THESIS BREACH — FULL EXIT (SELL 100%)"
+        exit_verdict = "TRIGGER 1: STRUCTURAL THESIS BREACH - FULL EXIT (SELL 100%)"
         exit_color = "#dc2626"  # Crimson Red
         if roce_breach:
             triggers_fired.append(f"Capital Efficiency Failure: ROCE ({roce_pct:.1f}%) dropped below WACC ({wacc_pct:.1f}%).")
@@ -289,19 +293,19 @@ def evaluate_exit_and_trim_strategy(
             triggers_fired.append(f"Moat Deterioration: Business Moat Grade fell to '{moat_grade}' alongside quarterly earnings pressure.")
 
         tranche_plan = [
-            "Tranche 1 (Immediate): Liquidate 50%–100% of position at market price—do not wait for a bounce.",
-            "Tranche 2 (Within 3–5 Days): Exit any remaining shares and reallocate cash to A+/A watchlisted compounders.",
+            "Tranche 1 (Immediate): Liquidate 50%-100% of position at market price-do not wait for a bounce.",
+            "Tranche 2 (Within 3-5 Days): Exit any remaining shares and reallocate cash to A+/A watchlisted compounders.",
         ]
 
     elif valuation_bubble:
-        exit_verdict = "✂️ TRIGGER 2: VALUATION EUPHORIA — TRIM 30% TO 50% (LOCK MULTI-YEAR GAINS)"
+        exit_verdict = "TRIGGER 2: VALUATION EUPHORIA - TRIM 30% TO 50% (LOCK MULTI-YEAR GAINS)"
         exit_color = "#f59e0b"  # Amber
         triggers_fired.append(
             f"Reverse DCF Euphoria: CMP (₹{cmp:,.1f}) prices in {implied_g1_pct:.1f}%/yr growth for 10 years "
             f"(+{growth_expectation_gap:.1f}% above realistic model g₁ of {model_g1_pct:.1f}%)."
         )
         if peg_ratio is not None and peg_ratio >= 3.0:
-            triggers_fired.append(f"Multiple Stretch: PEG ratio is {peg_ratio:.2f}x, pulling forward 3–5 years of future returns.")
+            triggers_fired.append(f"Multiple Stretch: PEG ratio is {peg_ratio:.2f}x, pulling forward 3-5 years of future returns.")
 
         tranche_plan = [
             f"Tranche 1 (Sell 1/3rd Now @ ~₹{cmp:,.0f}): Take initial capital / froth off the table while keeping core compounder exposure.",
@@ -310,23 +314,24 @@ def evaluate_exit_and_trim_strategy(
         ]
 
     elif concentration_breach:
-        exit_verdict = f"⚖️ TRIGGER 3: CONCENTRATION CAP BREACH — REBALANCE ({concentration_excess_pct:.1f}% EXCESS)"
+        exit_verdict = f"TRIGGER 3: CONCENTRATION CAP BREACH - REBALANCE ({concentration_excess_pct:.1f}% EXCESS)"
         exit_color = "#a855f7"  # Purple
         triggers_fired.append(
             f"Single-Stock Weight ({current_portfolio_weight_pct:.1f}%) exceeds your {max_single_stock_cap_pct:.1f}% risk parity ceiling."
         )
-        trim_share_pct = round((concentration_excess_pct / current_portfolio_weight_pct) * 100.0, 1)
+        target_weight = max(0.0, max_single_stock_cap_pct - 2.0)
+        trim_share_pct = round(((current_portfolio_weight_pct - target_weight) / current_portfolio_weight_pct) * 100.0, 1)
         tranche_plan = [
             f"Portfolio Rebalance Action: Trim ~{trim_share_pct:.1f}% of your current shares in this stock to bring weight back down to {max_single_stock_cap_pct - 2.0:.1f}%.",
             "Core Retention: Keep the remaining position untouched to continue compounding.",
         ]
 
     elif opportunity_cost_breach:
-        exit_verdict = f"🔄 TRIGGER 4: OPPORTUNITY COST DRAG — ROTATE CAPITAL (+{irr_spread:.1f}% IRR UPGRADE)"
+        exit_verdict = f"TRIGGER 4: OPPORTUNITY COST DRAG - ROTATE CAPITAL (+{irr_spread:.1f}% IRR UPGRADE)"
         exit_color = "#0ea5e9"  # Sky Blue
         triggers_fired.append(
             f"Prospective 5-Yr IRR ({est_holding_irr:.1f}%/yr) trails your best replacement idea ({replacement_irr_pct:.1f}%/yr) "
-            f"by {irr_spread:+.1f}%/yr—clearing the 8% hurdle required to absorb 12.5% LTCG tax."
+            f"by {irr_spread:+.1f}%/yr-clearing the 8% hurdle required to absorb 12.5% LTCG tax."
         )
         tranche_plan = [
             "Tranche 1 (Swap 50%): Liquidate half of this stagnant holding to fund Tranche 1 & 2 of your higher-IRR target.",
@@ -334,7 +339,7 @@ def evaluate_exit_and_trim_strategy(
         ]
 
     else:
-        exit_verdict = "🛡️ NO SELL TRIGGERS ACTIVE — HOLD CORE & LET IT COMPOUND"
+        exit_verdict = "NO SELL TRIGGERS ACTIVE - HOLD CORE & LET IT COMPOUND"
         exit_color = "#10b981"  # Emerald Green
         triggers_fired.append(
             f"Thesis Intact: Moat Grade ({moat_grade}), ROCE ({roce_pct or 0:.1f}%), and Implied Growth ({implied_g1_pct:.1f}%) are within healthy bounds."
@@ -625,6 +630,9 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
                 cols_clean.append(c_str)
 
         df_out = pd.DataFrame.from_dict(rows_dict, orient="index", columns=cols_clean)
+        if section_id == "profit-loss":
+            # drop the partial-year TTM column so annual growth compares full fiscal years
+            df_out = df_out.drop(columns=[c for c in df_out.columns if str(c).upper().startswith("TTM")], errors="ignore")
         return df_out
 
     quarters_df = parse_screener_table("quarters")
@@ -889,7 +897,7 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
     for i, col_name in enumerate(disp_cols):
         r_op[col_name] = fmt_cr_cell(op_profit_list[idx_offset + i])
     r_op["QoQ Change (%)"] = fmt_pct_cell(qoq_op)
-    r_op["YoY Change (%)"] = fmt_pct_cell(yoy_op) if has_yoy else "—"
+    r_op["YoY Change (%)"] = fmt_pct_cell(yoy_op) if has_yoy else "-"
     table_rows.append(r_op)
 
     m_label = "Financing Margin (%)" if profile["is_financial"] else "Operating Profit Margin (OPM %)"
@@ -898,14 +906,14 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
         v_m = opm_list[idx_offset + i]
         r_opm[col_name] = f"{v_m:.2f}%" if v_m is not None else "N/A"
     r_opm["QoQ Change (%)"] = f"{qoq_opm_bps:+.2f}% pts" if qoq_opm_bps is not None else "N/A"
-    r_opm["YoY Change (%)"] = f"{yoy_opm_bps:+.2f}% pts" if yoy_opm_bps is not None else "—"
+    r_opm["YoY Change (%)"] = f"{yoy_opm_bps:+.2f}% pts" if yoy_opm_bps is not None else "-"
     table_rows.append(r_opm)
 
     r_np: Dict[str, Any] = {"Quarterly Metric": "Net Profit (₹ Cr)"}
     for i, col_name in enumerate(disp_cols):
         r_np[col_name] = fmt_cr_cell(net_profit_list[idx_offset + i])
     r_np["QoQ Change (%)"] = fmt_pct_cell(qoq_np)
-    r_np["YoY Change (%)"] = fmt_pct_cell(yoy_np) if has_yoy else "—"
+    r_np["YoY Change (%)"] = fmt_pct_cell(yoy_np) if has_yoy else "-"
     table_rows.append(r_np)
 
     r_eps: Dict[str, Any] = {"Quarterly Metric": "Quarterly EPS (₹)"}
@@ -913,7 +921,7 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
         v_e = eps_list[idx_offset + i]
         r_eps[col_name] = format_inr_price(v_e)
     r_eps["QoQ Change (%)"] = fmt_pct_cell(qoq_eps)
-    r_eps["YoY Change (%)"] = fmt_pct_cell(yoy_eps) if has_yoy else "—"
+    r_eps["YoY Change (%)"] = fmt_pct_cell(yoy_eps) if has_yoy else "-"
     table_rows.append(r_eps)
 
     df_qtr_display = pd.DataFrame(table_rows).set_index("Quarterly Metric")
@@ -938,7 +946,7 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     if loss_to_profit:
-        t_status = "🚀 QUARTERLY LOSS-TO-PROFIT TURNAROUND DETECTED"
+        t_status = "QUARTERLY LOSS-TO-PROFIT TURNAROUND DETECTED"
         t_color = "#16a34a"
         t_summary = (
             f"Latest quarter swung to a positive Net Profit of ₹{np_latest:,.2f} Cr "
@@ -946,7 +954,7 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
         )
         score_bonus = 2.0
     elif strong_expansion or yoy_breakout:
-        t_status = "🟢 STRONG QUARTERLY EARNINGS & MARGIN MOMENTUM"
+        t_status = "STRONG QUARTERLY EARNINGS & MARGIN MOMENTUM"
         t_color = "#16a34a"
         s_qoq_str = f"{qoq_sales:+.1f}% QoQ" if qoq_sales is not None else ""
         s_yoy_str = f" / {yoy_sales:+.1f}% YoY" if yoy_sales is not None else ""
@@ -958,14 +966,14 @@ def extract_quarterly_trend_analysis(bundle: Dict[str, Any]) -> Dict[str, Any]:
         )
         score_bonus = 1.5
     elif (qoq_np is not None and qoq_np < -12.0) or (yoy_np is not None and yoy_np < -15.0):
-        t_status = "🔴 QUARTERLY EARNINGS CONTRACTION / MARGIN PRESSURE"
+        t_status = "QUARTERLY EARNINGS CONTRACTION / MARGIN PRESSURE"
         t_color = "#dc2626"
         np_qoq_str = f"{qoq_np:+.1f}% QoQ" if qoq_np is not None else "N/A"
         np_yoy_str = f"{yoy_np:+.1f}% YoY" if yoy_np is not None else "N/A"
         t_summary = f"Latest quarter faced earnings pressure (Net Profit: {np_qoq_str}, {np_yoy_str})."
         score_bonus = -1.5
     else:
-        t_status = "⚖️ STEADY / MIXED QUARTERLY RUN-RATE"
+        t_status = "STEADY / MIXED QUARTERLY RUN-RATE"
         t_color = "#2563eb"
         t_summary = "Steady operational run-rate without sharp quarterly contraction."
         score_bonus = 0.5
@@ -1030,6 +1038,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     scr_bs = scr.get("bs_df", pd.DataFrame())
     scr_cf = scr.get("cf_df", pd.DataFrame())
     yearly_close_map = bundle.get("yearly_close_map", {})
+    assumed: List[str] = []
 
     rev_s = get_statement_row(inc, ["Total Revenue", "Operating Revenue", "Revenue", "Interest Income"])
     if rev_s is None or len(rev_s.dropna()) < 2:
@@ -1110,6 +1119,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     if roce_prev_pct is None and roce_pct is not None:
         roce_prev_pct = roce_pct * 0.94
+        assumed.append("prior-year ROCE (set to 94% of current)")
 
     roa_yf = safe_float(info.get("returnOnAssets"))
     roa_pct = roa_yf * 100.0 if roa_yf is not None else None
@@ -1164,6 +1174,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     historical_median_pe = float(np.median(hist_pe_list)) if hist_pe_list else None
     if historical_median_pe is None and pe_ratio is not None and forward_pe is not None and forward_pe > 0:
         historical_median_pe = float(np.mean([pe_ratio, forward_pe]))
+        assumed.append("historical P/E band (proxied by average of trailing & forward P/E)")
 
     latest_ni = safe_float(ni_s.dropna().iloc[0]) if (ni_s is not None and not ni_s.dropna().empty) else safe_float(info.get("netIncomeToCommon"))
     latest_ocf = safe_float(ocf_s.dropna().iloc[0]) if (ocf_s is not None and not ocf_s.dropna().empty) else safe_float(info.get("operatingCashflow"))
@@ -1197,6 +1208,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
                 recent_yoy = info_v * 100.0
         if past_cagr is None and recent_yoy is not None:
             past_cagr = recent_yoy * 0.90
+            assumed.append("historical growth CAGR (set to 90% of latest YoY - short history)")
 
         return {"latest": latest_val, "prev": prev_val, "recent_yoy_pct": recent_yoy, "past_cagr_pct": past_cagr}
 
@@ -1318,6 +1330,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "buyback_detected": buyback_detected,
         "buyback_verdict": buyback_verdict,
         "buyback_explanation": buyback_explanation,
+        "assumed_fields": sorted(set(assumed)),
     }
 
 
@@ -1423,7 +1436,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
 
     def status_badge(passed: Optional[bool], borderline: bool = False) -> str:
         if passed is None:
-            return "⚪ DATA N/A"
+            return "❔ DATA N/A"
         if passed:
             return "✅ PASS"
         if borderline:
@@ -1431,7 +1444,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
         return "❌ FAIL"
 
     if archetype == "MANUFACTURING_INDUSTRIAL":
-        sector_title = "🏭 Manufacturing, Auto & Heavy Industrials Checklist"
+        sector_title = "Manufacturing, Auto & Heavy Industrials Checklist"
         moat_focus = "Capital efficiency on physical plants (ROCE >= 15%), debt discipline across cycles, and positive FCF after CapEx."
         em_str = f"{em:.2f}% (3Y Avg: {em_past:.1f}%)" if (em is not None and em_past is not None) else (f"{em:.2f}%" if em is not None else "N/A")
         quant_checks = [
@@ -1471,7 +1484,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
         ]
 
     elif archetype == "BANKING_NBFC":
-        sector_title = "🏦 Banking, NBFCs & Financial Services Checklist"
+        sector_title = "Banking, NBFCs & Financial Services Checklist"
         moat_focus = "Asset quality (low NPAs), Return on Assets (ROA >= 1.2%), compounding book value (ROE >= 14%), and P/B valuation."
         quant_checks = [
             {
@@ -1510,7 +1523,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
         ]
 
     elif archetype == "IT_TECH":
-        sector_title = "💻 Information Technology & Software Services Checklist"
+        sector_title = "Information Technology & Software Services Checklist"
         moat_focus = "Asset-light scalability, high switching costs, strong cash conversion, and low leverage."
         roe_roce_str = f"ROE: {roe:.1f}% | ROCE: {roce:.1f}%" if (roe is not None and roce is not None) else (f"ROE: {roe:.1f}%" if roe is not None else "N/A")
         quant_checks = [
@@ -1550,7 +1563,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
         ]
 
     elif archetype == "FMCG_CONSUMER":
-        sector_title = "🛒 FMCG, Consumer Goods & Retail Brand Checklist"
+        sector_title = "FMCG, Consumer Goods & Retail Brand Checklist"
         moat_focus = "Brand pricing power, distribution dominance, negative/low working capital, and ROCE."
         quant_checks = [
             {
@@ -1589,7 +1602,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
         ]
 
     elif archetype == "PHARMA_HEALTH":
-        sector_title = "💊 Pharmaceuticals, Healthcare & Diagnostics Checklist"
+        sector_title = "Pharmaceuticals, Healthcare & Diagnostics Checklist"
         moat_focus = "R&D pipeline productivity, operating margins, USFDA/regulatory compliance, and working capital."
         quant_checks = [
             {
@@ -1628,7 +1641,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
         ]
 
     else:
-        sector_title = "⚡ Energy, Power & Infrastructure Checklist"
+        sector_title = "Energy, Power & Infrastructure Checklist"
         moat_focus = "Capital efficiency (ROCE >= 12%), order-book-to-cash conversion, manageable leverage."
         quant_checks = [
             {
@@ -1748,6 +1761,7 @@ def fetch_industry_peer_benchmarks(
 
 
 def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    assumed_dcf: List[str] = []
     info = bundle["info"]
     bs = bundle["balance_sheet"]
     cf = bundle["cash_flow"]
@@ -1784,6 +1798,7 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         if ni_val is not None and ni_val > 0:
             fcf_0 = ni_val * 0.85
             fcf_source = "Normalized Owner Earnings (85% Net Profit Proxy)"
+            assumed_dcf.append("free cash flow (proxied as 85% of net profit)")
 
     eps_ttm = safe_float(info.get("trailingEps")) or metrics.get("latest_stmt_eps") or safe_float(info.get("forwardEps"))
     if (eps_ttm is None or eps_ttm <= 0) and metrics.get("latest_ni") and shares and shares > 0:
@@ -1796,6 +1811,7 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
     if (fcf_0 is None or fcf_0 <= 0) and eps_ttm and eps_ttm > 0 and shares and shares > 0:
         fcf_0 = eps_ttm * shares * 0.85
         fcf_source = "Implied Owner Earnings (85% of EPS × Shares)"
+        assumed_dcf.append("free cash flow (proxied as 85% of EPS × shares)")
 
     total_cash = safe_float(info.get("totalCash"))
     if total_cash is None:
@@ -1827,6 +1843,8 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         if v is not None and v > 0
     ]
     est_g1 = float(np.median(candidates)) if candidates else 11.0
+    if not candidates:
+        assumed_dcf.append("Stage-1 growth (defaulted to 11% - no growth data)")
     base_g1_pct = float(np.clip(est_g1, 4.0, 20.0))
 
     beta = safe_float(info.get("beta"), default=1.0) or 1.0
@@ -1846,6 +1864,7 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
         "base_g1_pct": base_g1_pct,
         "base_discount_pct": base_discount_pct,
         "base_terminal_g_pct": base_terminal_g_pct,
+        "assumed_fields": assumed_dcf,
     }
 
 
@@ -1883,19 +1902,19 @@ def extract_pe_peg_analysis(
 
     if peg_ratio is None:
         peg_pts = 2.0
-        peg_status = "⚪ PEG N/A"
+        peg_status = "PEG N/A"
     elif peg_ratio <= 1.0:
         peg_pts = 5.0
-        peg_status = "🟢 Undervalued Growth (PEG <= 1.0x)"
+        peg_status = "Undervalued Growth (PEG <= 1.0x)"
     elif peg_ratio <= 1.5:
         peg_pts = 3.75
-        peg_status = "🟢 Fair GARP Multiple (1.0x - 1.5x)"
+        peg_status = "Fair GARP Multiple (1.0x - 1.5x)"
     elif peg_ratio <= 2.2:
         peg_pts = 2.0
-        peg_status = "🟡 Fully Priced for Growth (1.5x - 2.2x)"
+        peg_status = "Fully Priced for Growth (1.5x - 2.2x)"
     else:
         peg_pts = 0.0
-        peg_status = "🔴 Expensive / Stretched PEG (> 2.2x)"
+        peg_status = "Expensive / Stretched PEG (> 2.2x)"
 
     rel_pe_pts = 0.0
     if trailing_pe is not None and trailing_pe > 0:
@@ -1918,13 +1937,13 @@ def extract_pe_peg_analysis(
     total_pe_peg_pts = float(np.clip(peg_pts + rel_pe_pts, 0.0, 10.0))
 
     if total_pe_peg_pts >= 7.5:
-        overall_pe_verdict = "🟢 ATTRACTIVE MULTIPLE (Reasonable PEG & Multiples)"
+        overall_pe_verdict = "ATTRACTIVE MULTIPLE (Reasonable PEG & Multiples)"
         pe_badge_color = "#16a34a"
     elif total_pe_peg_pts >= 4.5:
-        overall_pe_verdict = "⚖️ FAIR VALUATION MULTIPLE (In Line with Historical/Sector Norms)"
+        overall_pe_verdict = "FAIR VALUATION MULTIPLE (In Line with Historical/Sector Norms)"
         pe_badge_color = "#2563eb"
     else:
-        overall_pe_verdict = "🔴 STRETCHED P/E & PEG MULTIPLE (Trading at a Valuation Premium)"
+        overall_pe_verdict = "STRETCHED P/E & PEG MULTIPLE (Trading at a Valuation Premium)"
         pe_badge_color = "#dc2626"
 
     return {
@@ -1975,7 +1994,7 @@ def estimate_years_to_target(
         years_clamped = float(np.clip(years_catchup, 0.5, 15.0))
         return (
             round(years_clamped, 1),
-            f"Priced Above Fair Value — Needs ~{years_clamped:.1f} Years of earnings growth at {g_rate * 100:.1f}%/yr to justify today's price",
+            f"Priced Above Fair Value - Needs ~{years_clamped:.1f} Years of earnings growth at {g_rate * 100:.1f}%/yr to justify today's price",
         )
 
 
@@ -2268,8 +2287,9 @@ def compute_decision_verdict(
     # 6. News Sentiment (0 - 30 pts)
     avg_comp = news_summary.get("avg_compound", 0.0)
     clamped_comp = float(np.clip(avg_comp, -0.5, 0.5))
-    sentiment_score_30 = ((clamped_comp + 0.5) / 1.0) * 30.0
-    total_score = float(np.clip(fundamental_score_70 + sentiment_score_30, 0.0, 100.0))
+    fundamental_scaled = fundamental_score_70 * ((100.0 - SENTIMENT_WEIGHT_PTS) / 70.0)
+    sentiment_score_30 = (clamped_comp + 0.5) * SENTIMENT_WEIGHT_PTS  # key name kept for compatibility
+    total_score = float(np.clip(fundamental_scaled + sentiment_score_30, 0.0, 100.0))
 
     # --- UPGRADE: SEPARATE BUSINESS MOAT GRADE (A+ TO D) ---
     is_a_plus = (
@@ -2279,9 +2299,12 @@ def compute_decision_verdict(
         and (checklist_result["pass_count"] >= checklist_result["total_checks"])
     )
 
-    if is_a_plus:
+    if roe is None:
+        moat_grade = "N/A"
+        moat_badge = "Insufficient data (ROE unavailable) - moat not graded"
+    elif is_a_plus:
         moat_grade = "A+"
-        moat_badge = "🏆 A+ (Elite Institutional Moat)"
+        moat_badge = "A+ (Elite Institutional Moat)"
     elif (
         (roce is not None and roce >= 15.0 if profile["roce_applicable"] else (roa is not None and roa >= 1.2))
         and (roe is not None and roe >= 14.0)
@@ -2289,16 +2312,16 @@ def compute_decision_verdict(
         and (checklist_result["pass_count"] >= 3)
     ):
         moat_grade = "A"
-        moat_badge = "✅ A (High-Quality Compounder)"
+        moat_badge = "A (High-Quality Compounder)"
     elif (roe is not None and roe >= 11.0) and ((de or 0.0) <= 1.10 if profile["de_applicable"] else True):
         moat_grade = "B"
-        moat_badge = "⚖️ B (Cyclical / Moderate Moat)"
+        moat_badge = "B (Cyclical / Moderate Moat)"
     elif (roe is not None and roe >= 6.0) and ((de or 0.0) <= 1.60 if profile["de_applicable"] else True):
         moat_grade = "C"
-        moat_badge = "⚠️ C (Weak Capital Efficiency)"
+        moat_badge = "C (Weak Capital Efficiency)"
     else:
         moat_grade = "D"
-        moat_badge = "🚨 D (Capital Destroyer / Structural Risk)"
+        moat_badge = "D (Capital Destroyer / Structural Risk)"
 
     # --- UPGRADE: SEPARATE VALUATION PRICE GRADE ---
     peg_val = pe_peg_analysis.get("peg_ratio")
@@ -2316,7 +2339,7 @@ def compute_decision_verdict(
 
     if severely_expensive_multiple:
         if moat_grade == "A+":
-            verdict = "💎 ELITE COMPOUNDER — PRICED FOR PERFECTION (HOLD EXISTING / BUY ON PULLBACK)"
+            verdict = "ELITE COMPOUNDER - PRICED FOR PERFECTION (HOLD EXISTING / BUY ON PULLBACK)"
             badge_color = "#00b4d8"
             verdict_summary = (
                 f"Passes 100% of sector moat checks with exceptional efficiency "
@@ -2324,30 +2347,30 @@ def compute_decision_verdict(
                 f"Do NOT lump with weak businesses. Hold core positions and accumulate via Staggered Buy Zones below."
             )
         elif moat_grade == "A":
-            verdict = "🌟 QUALITY COMPOUNDER — RICH VALUATION (HOLD / TRACK PULLBACK ZONES)"
+            verdict = "QUALITY COMPOUNDER - RICH VALUATION (HOLD / TRACK PULLBACK ZONES)"
             badge_color = "#f59e0b"
             verdict_summary = "Strong operational moat, but current market multiples leave zero margin of safety. Wait for pullbacks."
         else:
-            verdict = "🚫 OVERVALUED / MULTIPLE TRAP (AVOID)"
+            verdict = "OVERVALUED / MULTIPLE TRAP (AVOID)"
             badge_color = "#dc2626"
             verdict_summary = (
                 f"Negative Margin of Safety ({mos:.1f}%) combined with an extreme PEG ({peg_val:.2f}x) "
                 f"and a {moat_grade}-grade business moat creates severe de-rating risk."
             )
     elif total_score >= 75.0 and (mos is not None and mos >= 15.0) and checklist_result["pass_count"] >= 3:
-        verdict = "🚀 STRONG BUY (HIGH-CONVICTION GARP)"
+        verdict = "STRONG BUY (HIGH-CONVICTION GARP)"
         badge_color = "#16a34a"
         verdict_summary = "Rare institutional combination: high-quality moat trading at an attractive Margin of Safety."
     elif total_score >= 60.0 and (mos is not None and mos >= -5.0):
-        verdict = "✅ ACCUMULATE / FAIRLY VALUED GARP"
+        verdict = "ACCUMULATE / FAIRLY VALUED GARP"
         badge_color = "#2563eb"
         verdict_summary = "Solid fundamentals trading within fair valuation bounds."
     elif total_score >= 45.0:
-        verdict = "👀 HOLD / WATCHLIST"
+        verdict = "HOLD / WATCHLIST"
         badge_color = "#d97706"
         verdict_summary = "Moderate valuation and fundamentals; track quarterly execution."
     else:
-        verdict = "🔴 OVERVALUED / AVOID"
+        verdict = "OVERVALUED / AVOID"
         badge_color = "#dc2626"
         verdict_summary = "Unfavorable risk-reward balance under current fundamentals and market price."
 
@@ -2442,6 +2465,116 @@ def compute_decision_verdict(
     }
 
 
+def render_saved_tab() -> None:
+    """Tab 2: saved comparison ledger (kept separate so it survives analysis errors)."""
+    st.subheader("Saved Stock Valuation Ledger & Historical Comparison")
+    st.caption(
+        "Track and compare saved stock snapshots across Implied Growth Rate (g₁), Valuation Anchor Price, "
+        "Calculated Intrinsic Value, ROCE-to-ROE Spread, and FCF/Net Income Ratio."
+    )
+
+    saved_records = load_watchlist()
+
+    if not saved_records:
+        st.info("No stocks saved yet. Open Tab 1, run an analysis, and click **Save Stock to Comparison Watchlist**.")
+    else:
+        df_saved = pd.DataFrame(saved_records)
+        priority_cols = [
+            "Date",
+            "Ticker",
+            "Moat Grade",
+            "CMP (₹)",
+            "Implied Growth Rate (g₁ %)",
+"Assumed WACC (r %)", 
+            "Valuation Anchor Price (₹)",
+            "Calculated Intrinsic Value (₹)",
+            "ROCE-to-ROE Spread (%)",
+            "FCF/Net Income Ratio (%)",
+"Exit / Holding Action",           
+            "Thesis Kill-Switch", 
+            "SIP Buy Zone (₹)",
+            "GARP Buy Zone (₹)",
+            "Deep Value Zone (₹)",
+            "Verdict",
+        ]
+        display_cols = [c for c in priority_cols if c in df_saved.columns]
+
+        st.dataframe(
+            df_saved[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Implied Growth Rate (g₁ %)": st.column_config.NumberColumn("Implied Growth (g₁)", format="%.2f%%"),
+                "Valuation Anchor Price (₹)": st.column_config.NumberColumn("Valuation Anchor", format="₹%.2f"),
+                "Calculated Intrinsic Value (₹)": st.column_config.NumberColumn("Intrinsic Value", format="₹%.2f"),
+                "ROCE-to-ROE Spread (%)": st.column_config.NumberColumn("ROCE-ROE Spread", format="%+.2f%%"),
+                "FCF/Net Income Ratio (%)": st.column_config.NumberColumn("FCF / Net Income", format="%.1f%%"),
+                "CMP (₹)": st.column_config.NumberColumn("Saved CMP", format="₹%.2f"),
+            },
+        )
+
+        st.divider()
+        c_left, c_mid, c_right = st.columns([2, 1, 1])
+
+        with c_left:
+            tickers_list = df_saved["Ticker"].unique().tolist()
+            del_choice = st.selectbox(
+                "Select a stock snapshot to delete before replacing with fresh data:",
+                options=["-- Select Ticker --"] + tickers_list,
+            )
+            if del_choice != "-- Select Ticker --":
+                if st.button(f"Delete {del_choice} Entry", key="del_single_btn"):
+                    remaining = [x for x in saved_records if x.get("Ticker") != del_choice]
+                    save_watchlist_to_disk(remaining)
+                    st.rerun()
+
+        with c_mid:
+            csv_export = df_saved.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Export Ledger (CSV)",
+                data=csv_export,
+                file_name=f"indian_stocks_comparison_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with c_right:
+            if st.button("Reset Entire Watchlist", type="secondary", use_container_width=True):
+                reset_entire_watchlist()
+                st.success("Watchlist wiped clean.")
+                st.rerun()
+        # --- UPLOAD / RESTORE WATCHLIST FROM CSV ---
+        st.divider()
+        st.write("### Restore Watchlist from CSV")
+        uploaded_csv = st.file_uploader(
+            "Upload your previously exported stock comparison CSV file:",
+            type=["csv"],
+            key="watchlist_csv_upload"
+        )
+
+        _restore_sig = (uploaded_csv.name, uploaded_csv.size) if uploaded_csv is not None else None
+        if uploaded_csv is not None and st.session_state.get("_restored_sig") != _restore_sig:
+            try:
+                # Read uploaded CSV into DataFrame
+                imported_df = pd.read_csv(uploaded_csv)
+                
+                # Clean up/replace NaN values with empty strings or defaults so it doesn't break
+                imported_df = imported_df.fillna("")
+                
+                # Convert DataFrame records back to dictionaries
+                restored_records = imported_df.to_dict(orient="records")
+                
+                # Save directly using your watchlist storage function
+                save_watchlist_to_disk(restored_records)
+                st.session_state["_restored_sig"] = _restore_sig  # stops the rerun loop
+                
+                st.success("Watchlist successfully restored! Reloading app...")
+                # Force a complete rerun so session state clears and reloads from disk
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error processing uploaded CSV file: {e}")
+
+
 # ==============================================================================
 # 10. STREAMLIT APP RUNNER (2-TAB ARCHITECTURE)
 # ==============================================================================
@@ -2449,13 +2582,13 @@ def main() -> None:
     load_watchlist()
 
     with st.sidebar:
-        st.header("🇮🇳 Indian Stock Selector")
+        st.header("Indian Stock Selector")
 
-        preset_options = ["Custom NSE/BSE Ticker..."] + [f"{k} — {v}" for k, v in INDIAN_PRESETS.items()]
+        preset_options = ["Custom NSE/BSE Ticker..."] + [f"{k} - {v}" for k, v in INDIAN_PRESETS.items()]
         selected_preset = st.selectbox("Quick-Select Indian Stock", options=preset_options, index=1)
 
         if selected_preset != "Custom NSE/BSE Ticker...":
-            default_ticker = selected_preset.split(" — ")[0].strip()
+            default_ticker = selected_preset.split(" - ")[0].strip()
         else:
             default_ticker = "CGPOWER.NS"
 
@@ -2475,10 +2608,10 @@ def main() -> None:
         resolved_ticker = f"{cleaned_input}{exchange_suffix}" if (cleaned_input and "." not in cleaned_input) else cleaned_input
 
         st.markdown("---")
-        st.subheader("📐 Valuation & DCF Overrides")
+        st.subheader("Valuation & DCF Overrides")
         use_custom_params = st.checkbox("Override Automatic Growth & WACC Assumptions", value=False)
         custom_g1 = st.slider(
-            "Base Stage-1 Growth Rate g₁ (Years 1–5, %)",
+            "Base Stage-1 Growth Rate g₁ (Years 1-5, %)",
             min_value=0.0, max_value=25.0, value=14.0, step=0.5,
             disabled=not use_custom_params,
         )
@@ -2493,7 +2626,7 @@ def main() -> None:
             disabled=not use_custom_params,
         )
         st.markdown("---")
-        st.subheader("🛡️ Exit Strategy & Sizing Rules")
+        st.subheader("Exit Strategy & Sizing Rules")
         current_weight_input = st.slider(
             "Your Current Portfolio Weight in This Stock (%)",
             min_value=0.0, max_value=40.0, value=6.0, step=0.5,
@@ -2510,7 +2643,7 @@ def main() -> None:
         )
 
         st.markdown("---")
-        st.subheader("🏢 Peer Benchmark & CSV")
+        st.subheader("Peer Benchmark & CSV")
         custom_peers_input = st.text_input(
             "Custom Indian Peer Symbols (optional)",
             value="",
@@ -2518,8 +2651,8 @@ def main() -> None:
         )
         uploaded_csv = st.file_uploader("Optional: Upload Custom Financials CSV", type=["csv"])
 
-        analyze_clicked = st.button("🔍 Analyze Indian Equity", type="primary", use_container_width=True)
-        if st.button("🔄 Clear Cache & Force Fresh Fetch", use_container_width=True):
+        analyze_clicked = st.button("Analyze Indian Equity", type="primary", use_container_width=True)
+        if st.button("Clear Cache & Force Fresh Fetch", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
@@ -2535,15 +2668,15 @@ def main() -> None:
     # TWO-TAB ARCHITECTURE: TAB 1 (VALUATION DASHBOARD) & TAB 2 (SAVED LIST)
     # --------------------------------------------------------------------------
     tab_analyzer, tab_saved = st.tabs([
-        "📊 Live Institutional Valuation Engine",
-        f"🗂️ Comparison Watchlist & History ({len(st.session_state.saved_analyses)})",
+        "Live Institutional Valuation Engine",
+        f"Comparison Watchlist & History ({len(st.session_state.saved_analyses)})",
     ])
 
     with tab_analyzer:
-        st.title("🇮🇳 Indian Market Institutional Value, P/E-PEG & DCF Analyzer")
+        st.title("Indian Market Institutional Value, P/E-PEG & DCF Analyzer")
         st.markdown(
-            "**Multi-Source Engine (`Screener.in` + `Yahoo Finance`)** • "
-            "**Dual-Axis Moat vs Valuation Grading** • **Reverse DCF Implied Growth** • **Staggered Accumulation Zones**"
+            "**Multi-Source Engine (`Screener.in` + `Yahoo Finance`)** - "
+            "**Dual-Axis Moat vs Valuation Grading** - **Reverse DCF Implied Growth** - **Staggered Accumulation Zones**"
         )
 
         with st.spinner(f"Analyzing fundamentals, P/E bands, and moat checks for {target_ticker}..."):
@@ -2571,9 +2704,13 @@ def main() -> None:
                 )
             except ValueError as ve:
                 st.error(f"**Ticker Lookup Error:** {ve}")
+                with tab_saved:
+                    render_saved_tab()
                 st.stop()
             except Exception as exc:
                 st.error(f"**Data Connectivity Issue:** `{exc}`. Tap 'Clear Cache & Force Fresh Fetch' in sidebar.")
+                with tab_saved:
+                    render_saved_tab()
                 st.stop()
 
         info = bundle["info"]
@@ -2590,12 +2727,19 @@ def main() -> None:
             f"**Market Cap:** {format_inr_crores(mcap)} | "
             f"**Data Feed:** `Yahoo Finance` + `{'Screener.in Consolidated' if scr_ok else 'NSE Median Fallback'}`"
         )
-        st.info(f"🧭 **Sector Routing:** {profile['applicable_note']}")
+        st.info(f"**Sector Routing:** {profile['applicable_note']}")
+        _assumed = sorted(set(metrics.get("assumed_fields", []) + dcf_inputs.get("assumed_fields", [])))
+        if _assumed:
+            st.warning(
+                "**Data-quality notice:** these inputs were estimated, not reported: "
+                + "; ".join(_assumed)
+                + ". Treat the verdict with extra caution."
+            )
 
         if uploaded_csv is not None:
             try:
                 user_df = pd.read_csv(uploaded_csv)
-                with st.expander("📂 View Uploaded Custom Financial CSV", expanded=True):
+                with st.expander("View Uploaded Custom Financial CSV", expanded=True):
                     st.dataframe(user_df, use_container_width=True)
             except Exception as e:
                 st.warning(f"Could not parse uploaded CSV: {e}")
@@ -2668,14 +2812,14 @@ def main() -> None:
                 delta_color="normal" if (peg_v is not None and peg_v <= 1.5) else "inverse",
             )
 
-        st.markdown("#### ⚡ Last 4 Quarters Results Trend & Early Turnaround Scanner")
+        st.markdown("#### Last 4 Quarters Results Trend & Early Turnaround Scanner")
         if qtr_analysis["available"]:
             q_color = qtr_analysis["turnaround_badge_color"]
             st.markdown(
                 f"""
                 <div style="background-color: #1e293b; border-left: 6px solid {q_color}; padding: 12px 16px; border-radius: 6px; margin-bottom: 12px;">
                     <strong style="color: {q_color}; font-size: 1.0rem;">{qtr_analysis['turnaround_status']}</strong>
-                    <span style="color: #94a3b8; font-size: 0.85rem;"> &nbsp;•&nbsp; Source: {qtr_analysis['source_used']}</span><br>
+                    <span style="color: #94a3b8; font-size: 0.85rem;"> &nbsp;-&nbsp; Source: {qtr_analysis['source_used']}</span><br>
                     <span style="color: #e2e8f0; font-size: 0.94rem;">{qtr_analysis['turnaround_summary']}</span>
                 </div>
                 """,
@@ -2685,7 +2829,7 @@ def main() -> None:
         else:
             st.info(qtr_analysis["turnaround_summary"])
 
-        st.markdown("#### 📊 Multi-Year Annual Financial Performance (₹ Crores)")
+        st.markdown("#### Multi-Year Annual Financial Performance (₹ Crores)")
         hist_df = build_three_year_history_table(bundle)
         if not hist_df.empty:
             st.dataframe(hist_df, use_container_width=True)
@@ -2696,12 +2840,12 @@ def main() -> None:
         st.header("2. Sector Moat Checklist")
         chk_col1, chk_col2 = st.columns([2, 1])
         with chk_col1:
-            st.markdown("#### 🤖 Automated Quantitative Sector Rules")
+            st.markdown("#### Automated Quantitative Sector Rules")
             df_chk = pd.DataFrame(checklist_result["quant_checks"]).set_index("Parameter")
             st.dataframe(df_chk, use_container_width=True)
 
         with chk_col2:
-            st.markdown("#### ☑️ Qualitative Moat Confirmation")
+            st.markdown("#### Qualitative Moat Confirmation")
             st.caption("Tick each check to add conviction points:")
             user_confirmed_count = 0
             for idx, q_text in enumerate(checklist_result["qual_questions"]):
@@ -2731,7 +2875,7 @@ def main() -> None:
         st.markdown(
             f"""
             <div style="background-color: #1e293b; border-left: 6px solid {bb_color}; padding: 14px 18px; border-radius: 6px; margin-bottom: 16px;">
-                <strong style="color: {bb_color}; font-size: 1.02rem;">🔎 Forensic Capital Allocation: {bb_verdict}</strong><br>
+                <strong style="color: {bb_color}; font-size: 1.02rem;">Forensic Capital Allocation: {bb_verdict}</strong><br>
                 <span style="color: #e2e8f0; font-size: 0.95rem;">{metrics['buyback_explanation']}</span>
             </div>
             """,
@@ -2749,8 +2893,8 @@ def main() -> None:
         nm_curr, nm_past = metrics["net_margin_curr"], metrics["net_margin_past"]
         eps_yoy, eps_cagr = metrics["eps_growth"]["recent_yoy_pct"], metrics["eps_growth"]["past_cagr_pct"]
 
-        em_momentum = f"🟢 Expanding ({em_curr - em_past:+.2f}%)" if (profile["ebitda_applicable"] and em_curr is not None and em_past is not None and em_curr >= em_past) else "N/A"
-        nm_momentum = f"🟢 Expanding ({nm_curr - nm_past:+.2f}%)" if (nm_curr is not None and nm_past is not None and nm_curr >= nm_past) else "N/A"
+        em_momentum = f"Expanding ({em_curr - em_past:+.2f}%)" if (profile["ebitda_applicable"] and em_curr is not None and em_past is not None and em_curr >= em_past) else "N/A"
+        nm_momentum = f"Expanding ({nm_curr - nm_past:+.2f}%)" if (nm_curr is not None and nm_past is not None and nm_curr >= nm_past) else "N/A"
 
         # Unpack P/E, sector P/E, and PEG variables from pe_peg_analysis
         t_pe_v = pe_peg_analysis["trailing_pe"]
@@ -2764,39 +2908,39 @@ def main() -> None:
             {
                 "Metric": "Trailing P/E Ratio",
                 "Current / Recent": f"{pe_v:.2f}x" if pe_v is not None else "N/A",
-                "Own 3–5Yr Historical Benchmark": f"{h_pe_v:.2f}x" if h_pe_v is not None else "N/A",
+                "Own 3-5Yr Historical Benchmark": f"{h_pe_v:.2f}x" if h_pe_v is not None else "N/A",
                 "Momentum / Historical Band": (
-                    f"🟢 {pe_peg_analysis['vs_hist_pct']:+.1f}% vs Hist Med"
+                    f"{pe_peg_analysis['vs_hist_pct']:+.1f}% vs Hist Med"
                     if (pe_peg_analysis["vs_hist_pct"] is not None and pe_peg_analysis["vs_hist_pct"] <= 0)
-                    else (f"🔴 {pe_peg_analysis['vs_hist_pct']:+.1f}% vs Hist Med" if pe_peg_analysis["vs_hist_pct"] is not None else "N/A")
+                    else (f"{pe_peg_analysis['vs_hist_pct']:+.1f}% vs Hist Med" if pe_peg_analysis["vs_hist_pct"] is not None else "N/A")
                 ),
                 "NSE Industry Median": f"{s_pe_v:.2f}x" if s_pe_v is not None else "N/A",
             },
             {
                 "Metric": "PEG Ratio",
                 "Current / Recent": f"{peg_v:.2f}x" if peg_v is not None else "N/A",
-                "Own 3–5Yr Historical Benchmark": "Lynch Rule <= 1.2x",
+                "Own 3-5Yr Historical Benchmark": "Lynch Rule <= 1.2x",
                 "Momentum / Historical Band": pe_peg_analysis["peg_status"],
                 "NSE Industry Median": "1.50x (GARP)",
             },
             {
                 "Metric": "Revenue Growth",
                 "Current / Recent": fmt_pct(rev_yoy),
-                "Own 3–5Yr Historical Benchmark": fmt_pct(rev_cagr),
-                "Momentum / Historical Band": "🟢 Accelerating" if (rev_yoy is not None and rev_cagr is not None and rev_yoy >= rev_cagr) else "🟡 Steady",
+                "Own 3-5Yr Historical Benchmark": fmt_pct(rev_cagr),
+                "Momentum / Historical Band": "Accelerating" if (rev_yoy is not None and rev_cagr is not None and rev_yoy >= rev_cagr) else "Steady",
                 "NSE Industry Median": fmt_pct(peer_medians.get("rev_growth_med")),
             },
             {
                 "Metric": "EBITDA Margin",
                 "Current / Recent": fmt_level_pct(em_curr) if profile["ebitda_applicable"] else "N/A",
-                "Own 3–5Yr Historical Benchmark": fmt_level_pct(em_past) if profile["ebitda_applicable"] else "N/A",
+                "Own 3-5Yr Historical Benchmark": fmt_level_pct(em_past) if profile["ebitda_applicable"] else "N/A",
                 "Momentum / Historical Band": em_momentum,
                 "NSE Industry Median": fmt_level_pct(peer_medians.get("ebitda_margin_med")) if profile["ebitda_applicable"] else "N/A",
             },
             {
                 "Metric": "Net Margin",
                 "Current / Recent": fmt_level_pct(nm_curr),
-                "Own 3–5Yr Historical Benchmark": fmt_level_pct(nm_past),
+                "Own 3-5Yr Historical Benchmark": fmt_level_pct(nm_past),
                 "Momentum / Historical Band": nm_momentum,
                 "NSE Industry Median": fmt_level_pct(peer_medians.get("net_margin_med")),
             },
@@ -2804,7 +2948,7 @@ def main() -> None:
         st.dataframe(pd.DataFrame(comparison_rows).set_index("Metric"), use_container_width=True)
 
         if not df_peers.empty:
-            with st.expander("🏢 View Indian Sector Peer Comparison Table", expanded=False):
+            with st.expander("View Indian Sector Peer Comparison Table", expanded=False):
                 st.dataframe(df_peers.set_index("Ticker").round(2), use_container_width=True)
 
         st.divider()
@@ -2946,7 +3090,7 @@ def main() -> None:
             replacement_irr_pct=alt_irr_input,
         )
 
-        st.markdown("#### 🎯 Automated Exit Strategy & Position Management Playbook (For Existing Holders)")
+        st.markdown("#### Automated Exit Strategy & Position Management Playbook (For Existing Holders)")
         st.markdown(
             f"""
             <div style="
@@ -2960,9 +3104,9 @@ def main() -> None:
                     {exit_plan['exit_verdict']}
                 </h4>
                 <span style="color: #94a3b8; font-size: 0.90rem;">
-                    • <b>Est. Holding 5-Yr IRR:</b> <code>{exit_plan['est_holding_irr']:.1f}%/yr</code> &nbsp;|&nbsp;
-                    • <b>Alternative Idea Spread:</b> <code>{exit_plan['irr_spread']:+.1f}%/yr</code> (Hurdle >= +8.0% for 12.5% LTCG) &nbsp;|&nbsp;
-                    • <b>Your Allocation:</b> <code>{current_weight_input:.1f}%</code> (Cap: {max_cap_input:.1f}%)
+                    - <b>Est. Holding 5-Yr IRR:</b> <code>{exit_plan['est_holding_irr']:.1f}%/yr</code> &nbsp;|&nbsp;
+                    - <b>Alternative Idea Spread:</b> <code>{exit_plan['irr_spread']:+.1f}%/yr</code> (Hurdle >= +8.0% for 12.5% LTCG) &nbsp;|&nbsp;
+                    - <b>Your Allocation:</b> <code>{current_weight_input:.1f}%</code> (Cap: {max_cap_input:.1f}%)
                 </span>
             </div>
             """,
@@ -2971,11 +3115,11 @@ def main() -> None:
 
         ex_col1, ex_col2 = st.columns(2)
         with ex_col1:
-            st.markdown("**🔍 Diagnostic Trigger Audit:**")
+            st.markdown("**Diagnostic Trigger Audit:**")
             for tf in exit_plan["triggers_fired"]:
                 st.markdown(f"- {tf}")
         with ex_col2:
-            st.markdown("**📋 Anti-Regret Tranche Execution Plan:**")
+            st.markdown("**Anti-Regret Tranche Execution Plan:**")
             for tp in exit_plan["tranche_plan"]:
                 st.markdown(f"- {tp}")
 
@@ -2984,259 +3128,136 @@ def main() -> None:
             f"FCF/PAT falls < 45%, or D/E exceeds 1.0x"
         )
         kill_switch_remark = st.text_input(
-            "🛡️ Thesis Invalidation Kill-Switch (Auto-generated or customize before saving to Tab 2):",
+            "Thesis Invalidation Kill-Switch (Auto-generated or customize before saving to Tab 2):",
             value=default_ks,
             key=f"ks_input_{target_ticker}",
         )
 
 
-        # REVERSE DCF & BUY ZONES COMPUTATION
-    fcf_per_share_calc = (dcf_inputs["fcf_0"] / dcf_inputs["shares"]) if (dcf_inputs.get("fcf_0") and dcf_inputs.get("shares") and dcf_inputs["shares"] > 0) else (dcf_inputs.get("eps_ttm") or 1.0)
-    net_cash_per_share = ((dcf_inputs["total_cash"] - dcf_inputs["total_debt"]) / dcf_inputs["shares"]) if (dcf_inputs.get("shares") and dcf_inputs["shares"] > 0) else 0.0
+            # RENDER DUAL-AXIS VERDICT CARD
+        st.markdown(
+                f"""
+                <div style="
+                    background-color: #0f172a;
+                    border-left: 8px solid {decision['badge_color']};
+                    padding: 20px 24px;
+                    border-radius: 8px;
+                    margin-bottom: 16px;
+                ">
+                    <h2 style="color: #f8fafc; margin: 0 0 8px 0; font-weight: 800;">
+                        INSTITUTIONAL VERDICT:
+                        <span style="color: {decision['badge_color']};">{decision['verdict']}</span>
+                    </h2>
+                    <p style="color: #cbd5e1; font-size: 1.02rem; margin: 0 0 8px 0;">{decision['verdict_summary']}</p>
+                    <p style="color: #38bdf8; font-size: 0.95rem; font-weight: 600; margin: 0;">
+                        Timeline to Reach Base-Case Blended IV ({format_inr_price(base_res['blended_intrinsic'])}):
+                        <span style="color: #f8fafc;">{decision['base_timeline_label']}</span>
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-    implied_g1_pct = calculate_reverse_dcf_growth(
-            cmp=current_price,
-            base_cf_per_share=fcf_per_share_calc,
-            wacc=applied_r / 100.0,
-            terminal_g=applied_term_g / 100.0,
-            stage1_years=10,
-            net_cash_per_share=net_cash_per_share,
-        )
+            # METRIC GAUGES
+        roce_val = metrics["roce_pct"] or 0.0
+        roe_val = metrics["roe_pct"] or 0.0
+        roce_roe_spread = round(roce_val - roe_val, 2)
+        fcf_ni_val = metrics.get("fcf_to_ni_ratio")
+        fcf_ni_pct = round(fcf_ni_val * 100.0, 1) if fcf_ni_val is not None else 0.0
 
-    buy_zones = calculate_staggered_buy_zones(
-            cmp=current_price,
-            dcf_intrinsic=base_res["dcf_intrinsic"],
-            graham_val=base_res["graham_intrinsic"],
-            eps_ttm=dcf_inputs["eps_ttm"],
-            expected_g1_pct=applied_g1,
-            moat_grade=decision["moat_grade"],
-        )
-    valuation_anchor_price = buy_zones["valuation_anchor"]
+        vg1, vg2, vg3 = st.columns(3)
+        vg1.metric("Business Moat Quality Grade", decision["moat_grade"], decision["moat_badge"])
+        vg2.metric("Valuation Price Grade", decision["val_grade"], f"PEG: {pe_peg_analysis['peg_ratio'] or 0:.2f}x | MoS: {base_res['blended_mos_pct'] or 0:.1f}%")
+        vg3.metric(
+                "ROCE-to-ROE Spread",
+                f"{roce_roe_spread:+.2f}%",
+                "Low Financial Leverage / Pure Moat" if roce_roe_spread >= 0 else "Leverage Assisted ROE",
+            )
 
+        st.markdown("#### Automated Reverse DCF & Staggered Buy-Zone Accumulation Tranches")
+        r_col1, r_col2, r_col3, r_col4 = st.columns(4)
 
-        # RENDER DUAL-AXIS VERDICT CARD
-    st.markdown(
-            f"""
-            <div style="
-                background-color: #0f172a;
-                border-left: 8px solid {decision['badge_color']};
-                padding: 20px 24px;
-                border-radius: 8px;
-                margin-bottom: 16px;
-            ">
-                <h2 style="color: #f8fafc; margin: 0 0 8px 0; font-weight: 800;">
-                    INSTITUTIONAL VERDICT:
-                    <span style="color: {decision['badge_color']};">{decision['verdict']}</span>
-                </h2>
-                <p style="color: #cbd5e1; font-size: 1.02rem; margin: 0 0 8px 0;">{decision['verdict_summary']}</p>
-                <p style="color: #38bdf8; font-size: 0.95rem; font-weight: 600; margin: 0;">
-                    ⏳ Timeline to Reach Base-Case Blended IV ({format_inr_price(base_res['blended_intrinsic'])}):
-                    <span style="color: #f8fafc;">{decision['base_timeline_label']}</span>
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # METRIC GAUGES
-    roce_val = metrics["roce_pct"] or 0.0
-    roe_val = metrics["roe_pct"] or 0.0
-    roce_roe_spread = round(roce_val - roe_val, 2)
-    fcf_ni_val = metrics.get("fcf_to_ni_ratio")
-    fcf_ni_pct = round(fcf_ni_val * 100.0, 1) if fcf_ni_val is not None else 0.0
-
-    vg1, vg2, vg3 = st.columns(3)
-    vg1.metric("Business Moat Quality Grade", decision["moat_grade"], decision["moat_badge"])
-    vg2.metric("Valuation Price Grade", decision["val_grade"], f"PEG: {pe_peg_analysis['peg_ratio'] or 0:.2f}x | MoS: {base_res['blended_mos_pct'] or 0:.1f}%")
-    vg3.metric(
-            "ROCE-to-ROE Spread",
-            f"{roce_roe_spread:+.2f}%",
-            "Low Financial Leverage / Pure Moat" if roce_roe_spread >= 0 else "Leverage Assisted ROE",
-        )
-
-    st.markdown("#### 🔄 Automated Reverse DCF & Staggered Buy-Zone Accumulation Tranches")
-    r_col1, r_col2, r_col3, r_col4 = st.columns(4)
-
-    growth_gap = round(implied_g1_pct - applied_g1, 2)
-    r_col1.metric(
-            "Market-Implied Growth (Reverse DCF g₁)",
-            f"{implied_g1_pct:.2f}% / yr",
-            f"{growth_gap:+.2f}% vs Model ({applied_g1:.1f}%)",
-            delta_color="inverse",
-        )
-    r_col2.metric(
-            "🟢 Aggressive SIP Zone",
-            f"₹{buy_zones['sip_zone'][0]:,.1f} – ₹{buy_zones['sip_zone'][1]:,.1f}",
-            "Tranche 1 (Quality Anchor)",
-        )
-    r_col3.metric(
-            "🔵 GARP Fair-Multiple Zone",
-            f"₹{buy_zones['garp_zone'][0]:,.1f} – ₹{buy_zones['garp_zone'][1]:,.1f}",
-            "Tranche 2 (Core Position)",
-        )
-    r_col4.metric(
-            "🟣 Deep Value Graham Zone",
-            f"₹{buy_zones['deep_value_zone'][0]:,.1f} – ₹{buy_zones['deep_value_zone'][1]:,.1f}",
-            "Tranche 3 (Max Safety)",
-        )
-    # SAVE SNAPSHOT ACTION SECTION
-    st.divider()
-    st.markdown("#### 💾 Save / Update Analysis to Comparison Ledger")
-    s_col1, s_col2 = st.columns([2, 1])
+        growth_gap = round(implied_g1_pct - applied_g1, 2)
+        r_col1.metric(
+                "Market-Implied Growth (Reverse DCF g₁)",
+                f"{implied_g1_pct:.2f}% / yr",
+                f"{growth_gap:+.2f}% vs Model ({applied_g1:.1f}%)",
+                delta_color="inverse",
+            )
+        r_col2.metric(
+                "Aggressive SIP Zone",
+                f"₹{buy_zones['sip_zone'][0]:,.1f} - ₹{buy_zones['sip_zone'][1]:,.1f}",
+                "Tranche 1 (Quality Anchor)",
+            )
+        r_col3.metric(
+                "GARP Fair-Multiple Zone",
+                f"₹{buy_zones['garp_zone'][0]:,.1f} - ₹{buy_zones['garp_zone'][1]:,.1f}",
+                "Tranche 2 (Core Position)",
+            )
+        r_col4.metric(
+                "Deep Value Graham Zone",
+                f"₹{buy_zones['deep_value_zone'][0]:,.1f} - ₹{buy_zones['deep_value_zone'][1]:,.1f}",
+                "Tranche 3 (Max Safety)",
+            )
+        # SAVE SNAPSHOT ACTION SECTION
+        st.divider()
+        st.markdown("#### Save / Update Analysis to Comparison Ledger")
+        s_col1, s_col2 = st.columns([2, 1])
     
-    with s_col1:
-        overwrite_mode = st.checkbox(
-            f"🔄 Replace existing saved entry for {target_ticker} (uncheck to log historical date snapshot)",
-            value=True,
-            key=f"overwrite_{target_ticker}",
-        )
+        with s_col1:
+            overwrite_mode = st.checkbox(
+                f"Replace existing saved entry for {target_ticker} (uncheck to log historical date snapshot)",
+                value=True,
+                key=f"overwrite_{target_ticker}",
+            )
         
-    with s_col2:
-        if st.button("💾 Save Stock to Comparison Watchlist", use_container_width=True, type="primary"):
-            snapshot = {
-                "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "Ticker": target_ticker,
-                "Company": company_name,
-                "Moat Grade": decision["moat_grade"],
-                "Valuation Grade": decision["val_grade"],
-                "CMP (₹)": round(current_price, 2),
-                "Implied Growth Rate (g₁ %)": round(implied_g1_pct, 2),
-                "Model Growth (g₁ %)": round(applied_g1, 2),
-                "Assumed WACC (r %)": round(applied_r, 2),  
-                "Valuation Anchor Price (₹)": round(valuation_anchor_price, 2),
-                "Calculated Intrinsic Value (₹)": round(base_res["blended_intrinsic"] or base_res["dcf_intrinsic"] or 0.0, 2),
-                "ROCE-to-ROE Spread (%)": round(roce_roe_spread, 2),
-                "FCF/Net Income Ratio (%)": round(fcf_ni_pct, 2),
-                "SIP Buy Zone (₹)": f"₹{buy_zones['sip_zone'][0]:,.0f} - ₹{buy_zones['sip_zone'][1]:,.0f}",
-                "GARP Buy Zone (₹)": f"₹{buy_zones['garp_zone'][0]:,.0f} - ₹{buy_zones['garp_zone'][1]:,.0f}",
-                "Deep Value Zone (₹)": f"₹{buy_zones['deep_value_zone'][0]:,.0f} - ₹{buy_zones['deep_value_zone'][1]:,.0f}",
-                "Verdict": decision["verdict"],
-                "Exit / Holding Action": exit_plan["exit_verdict"],
-                "Thesis Kill-Switch": kill_switch_remark,
-            }
-            status_msg = upsert_stock_analysis(snapshot, replace_existing=overwrite_mode)
-            st.success(status_msg)
+        with s_col2:
+            if st.button("Save Stock to Comparison Watchlist", use_container_width=True, type="primary"):
+                snapshot = {
+                    "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "Ticker": target_ticker,
+                    "Company": company_name,
+                    "Moat Grade": decision["moat_grade"],
+                    "Valuation Grade": decision["val_grade"],
+                    "CMP (₹)": round(current_price, 2),
+                    "Implied Growth Rate (g₁ %)": round(implied_g1_pct, 2),
+                    "Model Growth (g₁ %)": round(applied_g1, 2),
+                    "Assumed WACC (r %)": round(applied_r, 2),  
+                    "Valuation Anchor Price (₹)": round(valuation_anchor_price, 2),
+                    "Calculated Intrinsic Value (₹)": round(base_res["blended_intrinsic"] or base_res["dcf_intrinsic"] or 0.0, 2),
+                    "ROCE-to-ROE Spread (%)": round(roce_roe_spread, 2),
+                    "FCF/Net Income Ratio (%)": round(fcf_ni_pct, 2),
+                    "SIP Buy Zone (₹)": f"₹{buy_zones['sip_zone'][0]:,.0f} - ₹{buy_zones['sip_zone'][1]:,.0f}",
+                    "GARP Buy Zone (₹)": f"₹{buy_zones['garp_zone'][0]:,.0f} - ₹{buy_zones['garp_zone'][1]:,.0f}",
+                    "Deep Value Zone (₹)": f"₹{buy_zones['deep_value_zone'][0]:,.0f} - ₹{buy_zones['deep_value_zone'][1]:,.0f}",
+                    "Verdict": decision["verdict"],
+                    "Exit / Holding Action": exit_plan["exit_verdict"],
+                    "Thesis Kill-Switch": kill_switch_remark,
+                }
+                status_msg = upsert_stock_analysis(snapshot, replace_existing=overwrite_mode)
+                st.success(status_msg)
 
-    # POSITIVES & RISKS
-    st.divider()
-    pos_col, risk_col = st.columns(2)
-    with pos_col:
-        st.markdown("### 🟢 Positive Points & Bullish Catalysts")
-        for pt in decision["positive_points"]:
-            st.markdown(f"- {pt}")
-    with risk_col:
-        st.markdown("### 🔴 Key Risks & Red Flags to Consider")
-        for rk in decision["risk_points"]:
-            st.markdown(f"- {rk}")
+        # POSITIVES & RISKS
+        st.divider()
+        pos_col, risk_col = st.columns(2)
+        with pos_col:
+            st.markdown("### Positive Points & Bullish Catalysts")
+            for pt in decision["positive_points"]:
+                st.markdown(f"- {pt}")
+        with risk_col:
+            st.markdown("### Key Risks & Red Flags to Consider")
+            for rk in decision["risk_points"]:
+                st.markdown(f"- {rk}")
+
+        st.caption(
+            "Educational analysis tool - not investment advice. Figures come from public data feeds and include estimated inputs where flagged; verify against company filings before acting."
+        )
 
     # --------------------------------------------------------------------------
     # TAB 2: SAVED COMPARISON WATCHLIST LEDGER
     # --------------------------------------------------------------------------
     with tab_saved:
-        st.subheader("🗂️ Saved Stock Valuation Ledger & Historical Comparison")
-        st.caption(
-            "Track and compare saved stock snapshots across Implied Growth Rate (g₁), Valuation Anchor Price, "
-            "Calculated Intrinsic Value, ROCE-to-ROE Spread, and FCF/Net Income Ratio."
-        )
-
-        saved_records = load_watchlist()
-
-        if not saved_records:
-            st.info("No stocks saved yet. Open Tab 1, run an analysis, and click **💾 Save Stock to Comparison Watchlist**.")
-        else:
-            df_saved = pd.DataFrame(saved_records)
-            priority_cols = [
-                "Date",
-                "Ticker",
-                "Moat Grade",
-                "CMP (₹)",
-                "Implied Growth Rate (g₁ %)",
-  "Assumed WACC (r %)", 
-                "Valuation Anchor Price (₹)",
-                "Calculated Intrinsic Value (₹)",
-                "ROCE-to-ROE Spread (%)",
-                "FCF/Net Income Ratio (%)",
-    "Exit / Holding Action",             # <--- ADD THIS
-                "Thesis Kill-Switch", 
-                "SIP Buy Zone (₹)",
-                "GARP Buy Zone (₹)",
-                "Deep Value Zone (₹)",
-                "Verdict",
-            ]
-            display_cols = [c for c in priority_cols if c in df_saved.columns]
-
-            st.dataframe(
-                df_saved[display_cols],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Implied Growth Rate (g₁ %)": st.column_config.NumberColumn("Implied Growth (g₁)", format="%.2f%%"),
-                    "Valuation Anchor Price (₹)": st.column_config.NumberColumn("Valuation Anchor", format="₹%.2f"),
-                    "Calculated Intrinsic Value (₹)": st.column_config.NumberColumn("Intrinsic Value", format="₹%.2f"),
-                    "ROCE-to-ROE Spread (%)": st.column_config.NumberColumn("ROCE-ROE Spread", format="%+.2f%%"),
-                    "FCF/Net Income Ratio (%)": st.column_config.NumberColumn("FCF / Net Income", format="%.1f%%"),
-                    "CMP (₹)": st.column_config.NumberColumn("Saved CMP", format="₹%.2f"),
-                },
-            )
-
-            st.divider()
-            c_left, c_mid, c_right = st.columns([2, 1, 1])
-
-            with c_left:
-                tickers_list = df_saved["Ticker"].unique().tolist()
-                del_choice = st.selectbox(
-                    "Select a stock snapshot to delete before replacing with fresh data:",
-                    options=["-- Select Ticker --"] + tickers_list,
-                )
-                if del_choice != "-- Select Ticker --":
-                    if st.button(f"🗑️ Delete {del_choice} Entry", key="del_single_btn"):
-                        remaining = [x for x in saved_records if x.get("Ticker") != del_choice]
-                        save_watchlist_to_disk(remaining)
-                        st.rerun()
-
-            with c_mid:
-                csv_export = df_saved.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📥 Export Ledger (CSV)",
-                    data=csv_export,
-                    file_name=f"indian_stocks_comparison_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-
-            with c_right:
-                if st.button("♻️ Reset Entire Watchlist", type="secondary", use_container_width=True):
-                    reset_entire_watchlist()
-                    st.success("Watchlist wiped clean.")
-                    st.rerun()
-            # --- 📂 UPLOAD / RESTORE WATCHLIST FROM CSV ---
-            st.divider()
-            st.write("### 🔄 Restore Watchlist from CSV")
-            uploaded_csv = st.file_uploader(
-                "Upload your previously exported stock comparison CSV file:",
-                type=["csv"],
-                key="watchlist_csv_upload"
-            )
-
-            if uploaded_csv is not None:
-                try:
-                    # Read uploaded CSV into DataFrame
-                    imported_df = pd.read_csv(uploaded_csv)
-                    
-                    # Clean up/replace NaN values with empty strings or defaults so it doesn't break
-                    imported_df = imported_df.fillna("")
-                    
-                    # Convert DataFrame records back to dictionaries
-                    restored_records = imported_df.to_dict(orient="records")
-                    
-                    # Save directly using your watchlist storage function
-                    save_watchlist_to_disk(restored_records)
-                    
-                    st.success("✅ Watchlist successfully restored! Reloading app...")
-                    # Force a complete rerun so session state clears and reloads from disk
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error processing uploaded CSV file: {e}")
+        render_saved_tab()
 
 
 if __name__ == "__main__":
