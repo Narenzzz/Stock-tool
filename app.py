@@ -2,7 +2,7 @@ import json
 import math
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import nltk
@@ -36,6 +36,7 @@ INDIAN_PRESETS = {
     "INFY.NS": "Infosys Ltd (IT Services)",
     "HDFCBANK.NS": "HDFC Bank Ltd (Private Bank)",
     "ICICIBANK.NS": "ICICI Bank Ltd (Private Bank)",
+    "ADANIENSOL.NS": "Adani Energy Solutions Ltd (Power Transmission)",
     "BAJFINANCE.NS": "Bajaj Finance Ltd (NBFC)",
     "RELIANCE.NS": "Reliance Industries Ltd (Energy / Telecom / Retail)",
     "SUZLON.NS": "Suzlon Energy Ltd (Renewable Wind Energy)",
@@ -236,6 +237,11 @@ def evaluate_exit_and_trim_strategy(
     current_portfolio_weight_pct: float = 5.0,
     max_single_stock_cap_pct: float = 15.0,
     replacement_irr_pct: float = 15.0,
+    cash_regime: str = "UNKNOWN",
+    leverage_mode: str = "standard",
+    icr: Optional[float] = None,
+    nd_ebitda: Optional[float] = None,
+    irr_hurdle_pct: float = 8.0,
 ) -> Dict[str, Any]:
     """
     Evaluates the 4 Institutional Selling Triggers:
@@ -253,8 +259,19 @@ def evaluate_exit_and_trim_strategy(
         and roce_pct is not None
         and roce_pct < (wacc_pct - 1.0)
     )
-    fcf_breach = fcf_ni_pct != 0.0 and fcf_ni_pct < 45.0
-    debt_spike = de_applicable and de_ratio is not None and de_ratio > 1.50
+    # Fail-safe: negative FCF caused by GROWTH CAPEX (cash earnings real, interest covered) is not a thesis break.
+    guard_active = cash_regime == "GROWTH_CAPEX"
+    fcf_breach_raw = fcf_ni_pct != 0.0 and fcf_ni_pct < 45.0
+    fcf_breach = (fcf_breach_raw and not guard_active) or cash_regime == "CASH_BURN"
+    if leverage_mode == "capital_intensive":      # regulated / contracted-cash-flow infrastructure: judge by cover, not raw D/E
+        debt_spike = de_applicable and (
+            (icr is not None and icr < 1.3)
+            or (nd_ebitda is not None and nd_ebitda > 8.0)
+            or (icr is None and nd_ebitda is None and de_ratio is not None and de_ratio > 3.5)
+        )
+    else:
+        debt_spike = de_applicable and de_ratio is not None and de_ratio > 1.50
+    guard_saved = guard_active and (fcf_breach_raw or (de_ratio is not None and de_ratio > 1.50))
     severe_qtr_decay = "CONTRACTION" in qtr_status and moat_grade in ["C", "D"]
 
     thesis_broken = (roce_breach and fcf_breach) or debt_spike or severe_qtr_decay or moat_grade == "D"
@@ -277,7 +294,7 @@ def evaluate_exit_and_trim_strategy(
     est_holding_irr = round(model_g1_pct + (mos_clamped * 0.18), 2)
     # Require >= 8.0% IRR upgrade spread to justify paying 12.5% LTCG tax + reinvestment risk
     irr_spread = round(replacement_irr_pct - est_holding_irr, 2)
-    opportunity_cost_breach = irr_spread >= 8.0 and moat_grade not in ["A+"]
+    opportunity_cost_breach = irr_spread >= irr_hurdle_pct and moat_grade not in ["A+"]
 
     # --- DECISION HIERARCHY ---
     if thesis_broken:
@@ -331,7 +348,7 @@ def evaluate_exit_and_trim_strategy(
         exit_color = "#0ea5e9"  # Sky Blue
         triggers_fired.append(
             f"Prospective 5-Yr IRR ({est_holding_irr:.1f}%/yr) trails your best replacement idea ({replacement_irr_pct:.1f}%/yr) "
-            f"by {irr_spread:+.1f}%/yr-clearing the 8% hurdle required to absorb 12.5% LTCG tax."
+            f"by {irr_spread:+.1f}%/yr-clearing the {irr_hurdle_pct:.1f}% tax-aware hurdle."
         )
         tranche_plan = [
             "Tranche 1 (Swap 50%): Liquidate half of this stagnant holding to fund Tranche 1 & 2 of your higher-IRR target.",
@@ -351,6 +368,10 @@ def evaluate_exit_and_trim_strategy(
             "Action: Do nothing. Sit tight and let compounding work without unnecessary tax friction.",
             "Add on Pullbacks: Use the Staggered Buy Zones above if the stock dips during market corrections.",
         ]
+
+    if guard_saved:
+        triggers_fired.insert(0, "Capex Fail-Safe ACTIVE: negative FCF / high borrowing is classified as growth investment backed by real operating cash flow "
+                                 "and adequate interest cover, so it was NOT treated as a thesis break. Keep monitoring net debt/EBITDA and project execution.")
 
     return {
         "exit_verdict": exit_verdict,
@@ -493,7 +514,7 @@ def classify_industry_profile(sector: str, industry: str, ticker: str = "") -> D
     ):
         archetype = "PHARMA_HEALTH"
     elif any(k in sec_lower or k in ind_lower for k in ["energy", "oil", "gas", "utilities", "power", "renewable", "wind", "solar"]) or any(
-        k in t_upper for k in ["ONGC.", "NTPC.", "POWERGRID.", "SUZLON.", "TATAPOWER.", "COALINDIA.", "ADANIGREEN."]
+        k in t_upper for k in ["ONGC.", "NTPC.", "POWERGRID.", "SUZLON.", "TATAPOWER.", "COALINDIA.", "ADANIGREEN.", "ADANIENSOL.", "ADANIPOWER."]
     ):
         archetype = "ENERGY_UTILITIES"
     else:
@@ -547,6 +568,10 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
         "pnl_df": pd.DataFrame(),
         "cf_df": pd.DataFrame(),
         "bs_df": pd.DataFrame(),
+        "ratios_df": pd.DataFrame(),
+        "shp_df": pd.DataFrame(),
+        "about": None,
+        "key_points": None,
     }
 
     urls = [
@@ -592,6 +617,8 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
                     ratios["roce_pct"] = r_val
                 elif "roe" in r_name and r_val is not None:
                     ratios["roe_pct"] = r_val
+                elif "dividend yield" in r_name and r_val is not None:
+                    ratios["div_yield_pct"] = r_val
 
     def parse_screener_table(section_id: str) -> pd.DataFrame:
         sec = soup.find("section", id=section_id)
@@ -639,6 +666,18 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
     pnl_df = parse_screener_table("profit-loss")
     bs_df = parse_screener_table("balance-sheet")
     cf_df = parse_screener_table("cash-flow")
+    ratios_df = parse_screener_table("ratios")
+    shp_df = parse_screener_table("shareholding")
+    try:
+        _m = re.search(r"Pledged percentage\s*([\d.]+)\s*%", soup.get_text(" ", strip=True))
+        if _m:
+            ratios["pledged_pct"] = float(_m.group(1))
+        _a = soup.select_one("div.company-profile .about")
+        _k = soup.select_one("div.company-profile .commentary")
+        result["about"] = re.sub(r"^About\s*", "", _a.get_text(" ", strip=True))[:1200] if _a else None
+        result["key_points"] = re.sub(r"^Key Points\s*", "", _k.get_text(" ", strip=True))[:1500] if _k else None
+    except Exception:
+        pass
 
     result["available"] = bool(ratios or not pnl_df.empty or not quarters_df.empty)
     result["ratios"] = ratios
@@ -646,6 +685,8 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
     result["pnl_df"] = pnl_df
     result["bs_df"] = bs_df
     result["cf_df"] = cf_df
+    result["ratios_df"] = ratios_df
+    result["shp_df"] = shp_df
     return result
 
 
@@ -754,6 +795,16 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
     industry = info.get("industry") or "General"
     profile = classify_industry_profile(sector, industry, ticker_clean)
 
+    recs_summary, upgrades = pd.DataFrame(), pd.DataFrame()
+    try:
+        recs_summary = ticker_obj.recommendations_summary
+    except Exception:
+        pass
+    try:
+        upgrades = ticker_obj.upgrades_downgrades
+    except Exception:
+        pass
+
     return {
         "ticker": ticker_clean,
         "currency": "INR",
@@ -771,6 +822,8 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
         "balance_sheet": balance_sheet,
         "cash_flow": cash_flow,
         "raw_news": raw_news,
+        "recs_summary": recs_summary,
+        "upgrades": upgrades,
     }
 
 
@@ -1493,7 +1546,7 @@ def evaluate_sector_checklist(bundle: Dict[str, Any], metrics: Dict[str, Any]) -
                 "Parameter": "Free Cash Flow After CapEx",
                 "Target Benchmark": "Positive (> ₹0 Cr)",
                 "Actual Value": format_inr_crores(fcf),
-                "Status": status_badge(fcf > 0 if fcf is not None else None),
+                "Status": status_badge(fcf > 0 if fcf is not None else None, borderline=(fcf is not None and fcf <= 0 and metrics.get("cash", {}).get("regime") == "GROWTH_CAPEX")),
                 "Why It Matters in This Sector": "Checks if plant CapEx leaves real cash for shareholders.",
             },
             {
@@ -1811,6 +1864,11 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
 
     fcf_0 = safe_float(info.get("freeCashflow")) or metrics.get("latest_fcf")
     fcf_source = "Reported TTM / Latest Annual Free Cash Flow"
+    _cash = metrics.get("cash", {})
+    if (fcf_0 is None or fcf_0 <= 0) and _cash.get("regime") == "GROWTH_CAPEX" and (_cash.get("owner_earnings") or 0) > 0:
+        fcf_0 = _cash["owner_earnings"]
+        fcf_source = "Owner earnings (CFO - maintenance capex ~ depreciation); growth capex excluded"
+        assumed_dcf.append("free cash flow (owner earnings: CFO minus depreciation, because FCF is depressed by growth capex)")
 
     if fcf_0 is None or fcf_0 <= 0:
         ocf_val = metrics.get("latest_ocf")
@@ -1879,7 +1937,7 @@ def extract_dcf_inputs(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[
     beta = safe_float(info.get("beta"), default=1.0) or 1.0
     beta_clamped = float(np.clip(beta, 0.65, 1.65))
 
-    rf_rate, erp, base_terminal_g_pct = 6.8, 5.0, 4.0
+    rf_rate, erp, base_terminal_g_pct = float(st.session_state.get("rf_rate", 6.8)), 5.0, 4.0
     base_discount_pct = float(np.clip(rf_rate + beta_clamped * erp, 9.5, 15.0))
 
     return {
@@ -2248,6 +2306,9 @@ def compute_decision_verdict(
     roce = metrics.get("roce_pct")
     roa = metrics.get("roa_pct")
     de = metrics.get("de_ratio")
+    de_g = de      # leverage used for GRADING only
+    if de is not None and profile["archetype"] == "ENERGY_UTILITIES" and metrics.get("cash", {}).get("regime") in ("HEALTHY", "GROWTH_CAPEX"):
+        de_g = de / 2.5   # regulated / contracted infrastructure structurally carries higher leverage
 
     # 1. Blended Margin of Safety Sub-Score (0 - 20 pts)
     if mos is None:
@@ -2324,7 +2385,7 @@ def compute_decision_verdict(
     is_a_plus = (
         (roce is not None and roce >= 20.0 if profile["roce_applicable"] else (roa is not None and roa >= 1.5))
         and (roe is not None and roe >= 18.0)
-        and ((de or 0.0) <= 0.30 if profile["de_applicable"] else True)
+        and ((de_g or 0.0) <= 0.30 if profile["de_applicable"] else True)
         and (checklist_result["pass_count"] >= checklist_result["total_checks"])
     )
 
@@ -2337,15 +2398,15 @@ def compute_decision_verdict(
     elif (
         (roce is not None and roce >= 15.0 if profile["roce_applicable"] else (roa is not None and roa >= 1.2))
         and (roe is not None and roe >= 14.0)
-        and ((de or 0.0) <= 0.60 if profile["de_applicable"] else True)
+        and ((de_g or 0.0) <= 0.60 if profile["de_applicable"] else True)
         and (checklist_result["pass_count"] >= 3)
     ):
         moat_grade = "A"
         moat_badge = "A (High-Quality Compounder)"
-    elif (roe is not None and roe >= 11.0) and ((de or 0.0) <= 1.10 if profile["de_applicable"] else True):
+    elif (roe is not None and roe >= 11.0) and ((de_g or 0.0) <= 1.10 if profile["de_applicable"] else True):
         moat_grade = "B"
         moat_badge = "B (Cyclical / Moderate Moat)"
-    elif (roe is not None and roe >= 6.0) and ((de or 0.0) <= 1.60 if profile["de_applicable"] else True):
+    elif (roe is not None and roe >= 6.0) and ((de_g or 0.0) <= 1.60 if profile["de_applicable"] else True):
         moat_grade = "C"
         moat_badge = "C (Weak Capital Efficiency)"
     else:
@@ -2508,10 +2569,23 @@ def render_saved_tab() -> None:
         st.info("No stocks saved yet. Open Tab 1, run an analysis, and click **Save Stock to Comparison Watchlist**.")
     else:
         df_saved = pd.DataFrame(saved_records)
+        if {"EBIT Yield (%)", "ROCE 5Y Avg (%)"} <= set(df_saved.columns):
+            _ey = pd.to_numeric(df_saved["EBIT Yield (%)"], errors="coerce")
+            _ro = pd.to_numeric(df_saved["ROCE 5Y Avg (%)"], errors="coerce")
+            if _ey.notna().sum() >= 2 and _ro.notna().sum() >= 2:   # Greenblatt-style: rank by earnings yield + return on capital
+                df_saved["Magic Formula Rank"] = (_ey.rank(ascending=False) + _ro.rank(ascending=False)).rank(method="min")
         priority_cols = [
             "Date",
             "Ticker",
             "Moat Grade",
+            "Cash-Flow Regime",
+            "Street Consensus",
+            "Street Target Upside (%)",
+            "Piotroski F-Score",
+            "Promoter Pledge (%)",
+            "Earnings Yield (%)",
+            "ROCE 5Y Avg (%)",
+            "Magic Formula Rank",
             "CMP (₹)",
             "Implied Growth Rate (g₁ %)",
 "Assumed WACC (r %)", 
@@ -2605,6 +2679,621 @@ def render_saved_tab() -> None:
 
 
 # ==============================================================================
+# 9B. VALUE-INVESTOR EXTRAS: CASH-FLOW FAIL-SAFE, QUALITY SCORES, CONVICTION, PORTFOLIO
+# ==============================================================================
+PORTFOLIO_FILE = "portfolio_holdings.json"
+# Listed-equity capital-gains rules (Budget 2024 onward; unchanged for FY2026-27 per current sources).
+# Health & education cess (4%) is added; surcharge is NOT modelled. Verify with your tax advisor.
+LTCG_RATE, LTCG_EXEMPTION_INR, STCG_RATE, TAX_CESS = 0.125, 125000.0, 0.20, 0.04
+
+
+def _f(x: Any) -> Optional[float]:
+    try:
+        if x is None or pd.isna(x):
+            return None
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt(v: Optional[float], suffix: str = "", nd: int = 1) -> str:
+    return "N/A" if v is None else f"{v:,.{nd}f}{suffix}"
+
+
+def _latest_stmt(df: pd.DataFrame, labels: List[str]) -> Optional[float]:
+    s = get_statement_row(df, labels)
+    if s is None:
+        return None
+    v = pd.to_numeric(s, errors="coerce").dropna()
+    return _f(v.iloc[0]) if not v.empty else None
+
+
+def _stmt_vals(df: pd.DataFrame, labels: List[str], n: int = 3) -> List[Optional[float]]:
+    s = get_statement_row(df, labels)
+    return [] if s is None else [_f(x) for x in list(s.values)[:n]]      # yfinance: most recent first
+
+
+def _scr_vals(df: pd.DataFrame, labels: List[str], scale: float = 1.0) -> List[float]:
+    s = get_screener_series_recent_first(df, labels, scale)
+    return [] if s is None else [float(x) for x in s.values]             # most recent first
+
+
+# ------------------------------------------------------------------------------
+# A. CASH-FLOW FAIL-SAFE  (negative FCF from GROWTH CAPEX  !=  genuine cash burn)
+# ------------------------------------------------------------------------------
+def assess_cash_flow_regime(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Separates 'investing for growth' (e.g. transmission / renewables build-out) from real cash distress."""
+    profile, info = bundle["profile"], bundle["info"]
+    cf, inc = bundle["cash_flow"], bundle["income_stmt"]
+    scr_pnl = bundle.get("screener", {}).get("pnl_df", pd.DataFrame())
+    out: Dict[str, Any] = {
+        "regime": "UNKNOWN", "label": "Cash-flow regime unknown (insufficient data)", "color": "#64748b",
+        "message": "Not enough cash-flow data to classify.", "checks": [], "owner_earnings": None,
+        "icr_used": None, "nd_ebitda": None, "ebit": None, "debt": None, "cash_bal": None, "fcf_ni_pct": None,
+    }
+    if profile["archetype"] == "BANKING_NBFC":
+        out.update(regime="NOT_APPLICABLE", label="Not applicable for banks / NBFCs",
+                   message="Free cash flow is not meaningful for lenders; use ROE, NIM, asset quality instead.")
+        return out
+
+    ocf, fcf, ni = metrics.get("latest_ocf"), metrics.get("latest_fcf"), metrics.get("latest_ni")
+    ebitda = (metrics.get("ebitda_growth") or {}).get("latest")
+    capex = _latest_stmt(cf, ["Capital Expenditure"])
+    capex = abs(capex) if capex is not None else None
+    if capex is None and ocf is not None and fcf is not None:
+        capex = max(ocf - fcf, 0.0)
+    dep = _latest_stmt(cf, ["Depreciation And Amortization", "Depreciation Amortization Depletion", "Depreciation"])
+    if dep is None:
+        dep = _latest_stmt(inc, ["Reconciled Depreciation"])
+    if dep is None:
+        sv = _scr_vals(scr_pnl, ["Depreciation"], 1e7)
+        dep = sv[0] if sv else None
+    interest = _latest_stmt(inc, ["Interest Expense", "Interest Expense Non Operating"])
+    if interest is None:
+        sv = _scr_vals(scr_pnl, ["Interest"], 1e7)
+        interest = sv[0] if sv else None
+    interest = abs(interest) if interest is not None else None
+    ebit = _latest_stmt(inc, ["EBIT", "Operating Income"])
+    if ebit is None and ebitda is not None and dep is not None:
+        ebit = ebitda - dep
+    debt, cash_bal = _f(info.get("totalDebt")), _f(info.get("totalCash"))
+    nd = (debt - (cash_bal or 0.0)) if debt is not None else None
+
+    pos = lambda a, b: (a / b) if (a is not None and b is not None and b > 0) else None
+    cfo_to_ebitda, capex_to_cfo, capex_to_dep = pos(ocf, ebitda), pos(capex, ocf), pos(capex, dep)
+    icr_ebit, icr_ebitda, nd_ebitda = pos(ebit, interest), pos(ebitda, interest), pos(nd, ebitda)
+    cap_int = profile["archetype"] == "ENERGY_UTILITIES"          # regulated / contracted-cash-flow infrastructure
+    icr_used = icr_ebitda if (cap_int and icr_ebitda is not None) else icr_ebit
+    nd_limit = 8.0 if cap_int else 4.5
+    fcf_ni_pct = (fcf / ni * 100.0) if (fcf is not None and ni and ni > 0) else None
+    rev_yoy = (metrics.get("rev_growth") or {}).get("recent_yoy_pct")
+    roce = metrics.get("roce_pct")
+
+    fcf_weak = (fcf is not None and fcf < 0) or (fcf_ni_pct is not None and fcf_ni_pct < 45.0)
+    cash_real = ocf is not None and ocf > 0 and (cfo_to_ebitda is None or cfo_to_ebitda >= 0.55)
+    growth_capex = (capex_to_dep is not None and capex_to_dep >= 1.3) or (capex_to_cfo is not None and capex_to_cfo >= 0.9)
+    interest_ok = icr_used is None or icr_used >= 1.5
+    leverage_ok = nd_ebitda is None or nd_ebitda <= nd_limit
+    growing = rev_yoy is None or rev_yoy > 0
+    returns_ok = roce is None or roce >= 7.0
+
+    out["checks"] = [
+        {"Check": "Operating cash flow is real (CFO > 0, CFO/EBITDA >= 55%)",
+         "Actual": f"CFO {format_inr_crores(ocf)} | CFO/EBITDA {_fmt(cfo_to_ebitda * 100 if cfo_to_ebitda is not None else None, '%', 0)}", "Pass": cash_real},
+        {"Check": "Negative FCF is driven by growth capex (capex >= 1.3x depreciation or >= 90% of CFO)",
+         "Actual": f"Capex/Dep {_fmt(capex_to_dep, 'x')} | Capex/CFO {_fmt(capex_to_cfo, 'x', 2)}", "Pass": growth_capex},
+        {"Check": f"Interest is comfortably covered ({'EBITDA' if (cap_int and icr_ebitda is not None) else 'EBIT'}/interest >= 1.5x)",
+         "Actual": _fmt(icr_used, "x"), "Pass": interest_ok if icr_used is not None else None},
+        {"Check": f"Leverage is serviceable (net debt/EBITDA <= {nd_limit:.1f}x)",
+         "Actual": _fmt(nd_ebitda, "x"), "Pass": leverage_ok if nd_ebitda is not None else None},
+        {"Check": "Business is still growing (revenue YoY > 0)", "Actual": _fmt(rev_yoy, "%"), "Pass": growing if rev_yoy is not None else None},
+        {"Check": "Returns not value-destroying (ROCE >= 7%)", "Actual": _fmt(roce, "%"), "Pass": returns_ok if roce is not None else None},
+    ]
+    out.update(icr_used=icr_used, nd_ebitda=nd_ebitda, ebit=ebit, debt=debt, cash_bal=cash_bal, fcf_ni_pct=fcf_ni_pct,
+               owner_earnings=(ocf - dep) if (ocf is not None and dep is not None) else None,
+               capex=capex, dep=dep, ocf=ocf, fcf=fcf, ebitda=ebitda, interest=interest)
+
+    enabled = st.session_state.get("failsafe_on", True)
+    if ocf is None and fcf is None:
+        pass
+    elif not fcf_weak:
+        out.update(regime="HEALTHY", label="HEALTHY FREE CASH FLOW", color="#16a34a",
+                   message="Free cash flow is positive and converts a healthy share of profit.")
+    elif cash_real and growth_capex and interest_ok and leverage_ok and growing and returns_ok:
+        if enabled:
+            out.update(regime="GROWTH_CAPEX", label="GROWTH-CAPEX PHASE - negative FCF is investment, not decay (fail-safe ACTIVE)",
+                       color="#0284c7",
+                       message=("Operating cash flow is real and interest is covered; the FCF deficit comes from capex well above depreciation. "
+                                "The app will NOT auto-exit on FCF or capital-intensity leverage, and values the business on owner earnings "
+                                "(CFO minus maintenance capex ~ depreciation). Monitor project commissioning, net debt/EBITDA and funding cost."))
+        else:
+            out.update(regime="WEAK_UNCLEAR", label="Weak FCF (growth-capex fail-safe is switched OFF in sidebar)", color="#f59e0b",
+                       message="Fail-safe disabled: negative FCF is treated like any other weak-cash-flow case.")
+    elif (ocf is not None and ocf <= 0) or (icr_used is not None and icr_used < 1.2) or (cfo_to_ebitda is not None and cfo_to_ebitda < 0.4):
+        out.update(regime="CASH_BURN", label="GENUINE CASH BURN - operating cash / interest cover is weak", color="#dc2626",
+                   message="Cash earnings are not backing reported profit or interest is barely covered. Treated as a real red flag.")
+    else:
+        out.update(regime="WEAK_UNCLEAR", label="WEAK FCF, CAUSE UNCLEAR - manual review", color="#f59e0b",
+                   message="Free cash flow is weak but the growth-capex tests are not all met. No guard applied; review the checks below.")
+    return out
+
+
+# ------------------------------------------------------------------------------
+# B. QUALITY / EARNINGS-INTEGRITY SCORES
+# ------------------------------------------------------------------------------
+def compute_piotroski(bundle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    inc, bs, cf = bundle["income_stmt"], bundle["balance_sheet"], bundle["cash_flow"]
+    two = lambda df, labels: (lambda v: (v + [None, None])[:2])(_stmt_vals(df, labels, 2))
+    ni0, ni1 = two(inc, ["Net Income", "Net Income Common Stockholders"])
+    ta0, ta1 = two(bs, ["Total Assets"])
+    cfo0, _ = two(cf, ["Operating Cash Flow"])
+    rv0, rv1 = two(inc, ["Total Revenue", "Operating Revenue"])
+    gp0, gp1 = two(inc, ["Gross Profit"])
+    ld0, ld1 = two(bs, ["Long Term Debt", "Total Debt"])
+    ca0, ca1 = two(bs, ["Current Assets", "Total Current Assets"])
+    cl0, cl1 = two(bs, ["Current Liabilities", "Total Current Liabilities"])
+    sh0, sh1 = two(bs, ["Ordinary Shares Number", "Share Issued"])
+    div = lambda a, b: (a / b) if (a is not None and b not in (None, 0)) else None
+    roa0, roa1 = div(ni0, ta0), div(ni1, ta1)
+    gt = lambda a, b: (a > b) if (a is not None and b is not None) else None
+    tests = {
+        "Positive return on assets": gt(roa0, 0.0),
+        "Positive operating cash flow": gt(cfo0, 0.0),
+        "ROA improved vs last year": gt(roa0, roa1),
+        "Cash flow exceeds net income (low accruals)": gt(cfo0, ni0),
+        "Leverage fell (debt / assets)": gt(div(ld1, ta1), div(ld0, ta0)),
+        "Current ratio improved": gt(div(ca0, cl0), div(ca1, cl1)),
+        "No share dilution": (sh0 <= sh1 * 1.005) if (sh0 is not None and sh1 is not None) else None,
+        "Gross margin improved": gt(div(gp0, rv0), div(gp1, rv1)),
+        "Asset turnover improved": gt(div(rv0, ta0), div(rv1, ta1)),
+    }
+    ev = [v for v in tests.values() if v is not None]
+    if len(ev) < 4:
+        return None
+    return {"score": sum(1 for v in ev if v), "evaluable": len(ev), "tests": tests}
+
+
+def compute_altman_z(bundle: Dict[str, Any], ebit: Optional[float]) -> Optional[Dict[str, Any]]:
+    """Altman Z'' (emerging-market, non-financial). Capital-intensive utilities naturally score low."""
+    bs = bundle["balance_sheet"]
+    ta = _latest_stmt(bs, ["Total Assets"])
+    ca = _latest_stmt(bs, ["Current Assets", "Total Current Assets"])
+    cl = _latest_stmt(bs, ["Current Liabilities", "Total Current Liabilities"])
+    re_ = _latest_stmt(bs, ["Retained Earnings"])
+    tl = _latest_stmt(bs, ["Total Liabilities Net Minority Interest", "Total Liabilities"])
+    eq = _latest_stmt(bs, ["Stockholders Equity", "Common Stock Equity"])
+    if None in (ta, ca, cl, re_, tl, eq, ebit) or not ta or not tl:
+        return None
+    z = 3.25 + 6.56 * (ca - cl) / ta + 3.26 * re_ / ta + 6.72 * ebit / ta + 1.05 * eq / tl
+    zone = "Safe" if z > 5.85 else ("Grey" if z >= 4.35 else "Distress")
+    return {"z": z, "zone": zone}
+
+
+def compute_accrual_quality(bundle: Dict[str, Any]) -> Optional[Dict[str, Optional[float]]]:
+    inc, bs, cf = bundle["income_stmt"], bundle["balance_sheet"], bundle["cash_flow"]
+    ni = [x for x in _stmt_vals(inc, ["Net Income", "Net Income Common Stockholders"], 3) if x is not None]
+    cfo = [x for x in _stmt_vals(cf, ["Operating Cash Flow"], 3) if x is not None]
+    n = min(len(ni), len(cfo))
+    if n < 2:
+        return None
+    cum = (sum(cfo[:n]) / sum(ni[:n])) if sum(ni[:n]) > 0 else None
+    ta = [x for x in _stmt_vals(bs, ["Total Assets"], 2) if x is not None]
+    sloan = ((ni[0] - cfo[0]) / (sum(ta) / len(ta))) if ta else None
+    return {"cum_cfo_ni": cum, "sloan": sloan, "years": n}
+
+
+def compute_value_extras(bundle: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    info, profile = bundle["info"], bundle["profile"]
+    scr = bundle.get("screener", {})
+    ratios = scr.get("ratios", {})
+    rdf, sdf, pnl = scr.get("ratios_df", pd.DataFrame()), scr.get("shp_df", pd.DataFrame()), scr.get("pnl_df", pd.DataFrame())
+    cash = metrics.get("cash", {})
+    is_bank = profile["archetype"] == "BANKING_NBFC"
+    ex: Dict[str, Any] = {}
+
+    rv = _scr_vals(rdf, ["ROCE %"])
+    ex["roce_hist"] = ({"latest": rv[0], "avg5": float(np.mean(rv[:5])), "avg_all": float(np.mean(rv[:10])),
+                        "min5": float(min(rv[:5])), "n": len(rv[:10])} if rv else None)
+    for key, lab in [("debtor_days", "Debtor Days"), ("inventory_days", "Inventory Days"), ("ccc", "Cash Conversion Cycle")]:
+        v = _scr_vals(rdf, [lab])
+        ex[key] = {"latest": v[0], "chg3": (v[0] - v[3]) if len(v) > 3 else None} if v else None
+
+    ex["div_yield"] = ratios.get("div_yield_pct")
+    if ex["div_yield"] is None:
+        dy = _f(info.get("trailingAnnualDividendYield"))
+        ex["div_yield"] = dy * 100.0 if dy is not None else None
+    po = _scr_vals(pnl, ["Dividend Payout %"])
+    ex["payout"] = po[0] if po else None
+
+    def holding(label: str) -> Optional[Dict[str, Optional[float]]]:
+        v = _scr_vals(sdf, [label])
+        if not v:
+            return None
+        base = v[4] if len(v) > 4 else (v[-1] if len(v) > 1 else None)
+        return {"latest": v[0], "chg_1y": (v[0] - base) if base is not None else None}
+    ex["promoter"], ex["fii"], ex["dii"] = holding("Promoters"), holding("FIIs"), holding("DIIs")
+    ex["pledge"] = ratios.get("pledged_pct")
+    ex["insiders_pct"] = (_f(info.get("heldPercentInsiders")) or 0.0) * 100.0 if info.get("heldPercentInsiders") is not None else None
+
+    ex["piotroski"] = None if is_bank else compute_piotroski(bundle)
+    ex["altman"] = None if is_bank else compute_altman_z(bundle, cash.get("ebit"))
+    ex["accrual"] = None if is_bank else compute_accrual_quality(bundle)
+
+    pe = metrics.get("pe_ratio")
+    rf = float(st.session_state.get("rf_rate", 6.8))
+    ex["earnings_yield"] = (100.0 / pe) if (pe and pe > 0) else None
+    ex["rf"] = rf
+    ex["ey_spread"] = (ex["earnings_yield"] - rf) if ex["earnings_yield"] is not None else None
+    mcap = _f(info.get("marketCap")) or _f(bundle.get("fast_mcap"))
+    ev = (mcap + (cash.get("debt") or 0.0) - (cash.get("cash_bal") or 0.0)) if mcap else None
+    ex["ebit_yield"] = (cash["ebit"] / ev * 100.0) if (ev and ev > 0 and cash.get("ebit") is not None) else None
+    ex["icr_used"], ex["nd_ebitda"] = cash.get("icr_used"), cash.get("nd_ebitda")
+    return ex
+
+
+# ------------------------------------------------------------------------------
+# C. STREET / INSIDER CONVICTION
+# ------------------------------------------------------------------------------
+def build_street_view(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    info, px = bundle["info"], bundle["current_price"]
+    n, mean = _f(info.get("numberOfAnalystOpinions")), _f(info.get("recommendationMean"))
+    key = str(info.get("recommendationKey") or "").lower()
+    tm, th, tl, tmed = (_f(info.get(k)) for k in ["targetMeanPrice", "targetHighPrice", "targetLowPrice", "targetMedianPrice"])
+    if mean is not None:
+        label = "Strong Buy" if mean <= 1.8 else "Buy" if mean <= 2.6 else "Hold" if mean <= 3.4 else "Underperform" if mean <= 4.2 else "Sell"
+    else:
+        label = {"strong_buy": "Strong Buy", "buy": "Buy", "hold": "Hold", "underperform": "Underperform", "sell": "Sell"}.get(key, "N/A")
+    coverage = "No coverage" if not n else ("High (10+ analysts)" if n >= 10 else "Moderate (4-9)" if n >= 4 else "Thin (1-3, low reliability)")
+    counts = None
+    rs = bundle.get("recs_summary")
+    if isinstance(rs, pd.DataFrame) and not rs.empty:
+        row = rs[rs["period"] == "0m"].iloc[0] if ("period" in rs.columns and (rs["period"] == "0m").any()) else rs.iloc[0]
+        try:
+            counts = {"Strong Buy": int(row.get("strongBuy", 0)), "Buy": int(row.get("buy", 0)), "Hold": int(row.get("hold", 0)),
+                      "Sell": int(row.get("sell", 0)), "Strong Sell": int(row.get("strongSell", 0))}
+        except (TypeError, ValueError):
+            counts = None
+    actions = None
+    ud = bundle.get("upgrades")
+    if isinstance(ud, pd.DataFrame) and not ud.empty:
+        d = ud.reset_index().head(8)
+        d = d.rename(columns={d.columns[0]: "Date"})
+        cols = [c for c in ["Date", "Firm", "Action", "FromGrade", "ToGrade"] if c in d.columns]
+        actions = d[cols].copy()
+        if "Date" in actions.columns:
+            actions["Date"] = pd.to_datetime(actions["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    has = any(v is not None for v in (n, mean, tm)) or label != "N/A"
+    return {"has_data": has, "n": int(n) if n else None, "mean": mean, "label": label, "coverage": coverage,
+            "tm": tm, "th": th, "tl": tl, "tmed": tmed, "upside_pct": ((tm / px - 1.0) * 100.0) if (tm and px) else None,
+            "counts": counts, "actions": actions}
+
+
+def build_conviction_lenses(decision: Dict[str, Any], base_res: Dict[str, Any], street: Dict[str, Any],
+                            extras: Dict[str, Any], cash: Dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    mos = base_res.get("blended_mos_pct")
+    sig = "Positive" if (mos is not None and mos >= 10) else "Negative" if (mos is not None and mos <= -10) else "Neutral"
+    rows.append(("Own valuation (blended IV)", sig, f"Margin of safety {_fmt(mos, '%')}"))
+    mg = decision.get("moat_grade")
+    rows.append(("Business quality (moat grade)", "Positive" if mg in ("A+", "A") else "Negative" if mg in ("C", "D") else "Neutral", f"Grade {mg}"))
+    rg = cash.get("regime")
+    rows.append(("Cash-flow integrity", "Positive" if rg == "HEALTHY" else "Negative" if rg == "CASH_BURN" else "Neutral", cash.get("label", "")))
+    pr, pl = extras.get("promoter"), extras.get("pledge")
+    if pr or pl is not None:
+        chg = pr.get("chg_1y") if pr else None
+        neg = (pl is not None and pl >= 20) or (chg is not None and chg <= -2)
+        posi = (chg is not None and chg >= 0.5) and not (pl is not None and pl >= 10)
+        rows.append(("Promoter / insider behaviour", "Negative" if neg else "Positive" if posi else "Neutral",
+                     f"Holding {_fmt(pr['latest'] if pr else None, '%')} (1Y chg {_fmt(chg, ' pp')}), pledge {_fmt(pl, '%')}"))
+    if street.get("has_data") and street.get("mean") is not None:
+        m = street["mean"]
+        rows.append(("Sell-side analysts (external)", "Positive" if m <= 2.4 else "Negative" if m >= 3.4 else "Neutral",
+                     f"{street['label']} ({_fmt(m, '', 2)}/5, {street['n'] or 'n/a'} analysts)"))
+    return pd.DataFrame(rows, columns=["Lens", "Signal", "Evidence"])
+
+
+def build_extra_points(extras: Dict[str, Any], cash: Dict[str, Any], street: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    pos, risk = [], []
+    pl, pr = extras.get("pledge"), extras.get("promoter")
+    if pl is not None and pl >= 50:
+        risk.append(f"**SEVERE Promoter Pledge:** {pl:.1f}% of promoter holding is pledged - forced-selling risk.")
+    elif pl is not None and pl >= 20:
+        risk.append(f"**Promoter Pledge ({pl:.1f}%):** elevated; monitor closely.")
+    if pr and pr.get("chg_1y") is not None:
+        if pr["chg_1y"] >= 0.5:
+            pos.append(f"**Promoter Buying:** holding up {pr['chg_1y']:+.1f} pp over the last year (now {pr['latest']:.1f}%).")
+        elif pr["chg_1y"] <= -2.0:
+            risk.append(f"**Promoter Selling:** holding down {pr['chg_1y']:+.1f} pp over the last year.")
+    rh = extras.get("roce_hist")
+    if rh and rh["avg5"] >= 15 and rh["latest"] >= rh["avg5"] * 0.9:
+        pos.append(f"**Durable Returns:** 5-yr average ROCE {rh['avg5']:.1f}% (min {rh['min5']:.1f}%), latest {rh['latest']:.1f}%.")
+    elif rh and rh["latest"] < rh["avg5"] * 0.8:
+        risk.append(f"**ROCE Fading:** latest {rh['latest']:.1f}% vs 5-yr average {rh['avg5']:.1f}%.")
+    pio = extras.get("piotroski")
+    if pio:
+        r = pio["score"] / pio["evaluable"]
+        if r >= 0.75:
+            pos.append(f"**Piotroski F-Score {pio['score']}/{pio['evaluable']}:** strong financial-health trend.")
+        elif r <= 0.35:
+            risk.append(f"**Piotroski F-Score {pio['score']}/{pio['evaluable']}:** weak and deteriorating fundamentals.")
+    alt = extras.get("altman")
+    if alt and alt["zone"] == "Distress":
+        risk.append(f"**Altman Z'' {alt['z']:.1f} (Distress zone):** leverage-heavy balance sheet (capital-intensive utilities often score low; judge with interest cover).")
+    ac = extras.get("accrual")
+    if ac and ac.get("cum_cfo_ni") is not None and ac["cum_cfo_ni"] < 0.7 and cash.get("regime") != "GROWTH_CAPEX":
+        risk.append(f"**Earnings Quality:** {ac['years']}-yr cumulative CFO is only {ac['cum_cfo_ni'] * 100:.0f}% of net profit.")
+    if ac and ac.get("sloan") is not None and ac["sloan"] > 0.10:
+        risk.append(f"**High Accruals (Sloan {ac['sloan'] * 100:.0f}% of assets):** profit is running ahead of cash.")
+    es = extras.get("ey_spread")
+    if es is not None and es > 0:
+        pos.append(f"**Earnings Yield {extras['earnings_yield']:.1f}% beats the {extras['rf']:.1f}% G-sec** (+{es:.1f} pp).")
+    elif es is not None and es < -2:
+        risk.append(f"**Earnings Yield {extras['earnings_yield']:.1f}% is {abs(es):.1f} pp below the {extras['rf']:.1f}% G-sec** - priced for sustained high growth.")
+    icr = extras.get("icr_used")
+    if icr is not None and icr < 2.0:
+        risk.append(f"**Thin Interest Cover ({icr:.1f}x).**")
+    elif icr is not None and icr >= 6.0:
+        pos.append(f"**Strong Interest Cover ({icr:.1f}x).**")
+    dd = extras.get("debtor_days")
+    if dd and dd.get("chg3") is not None and dd["latest"] > 0 and dd["chg3"] / max(dd["latest"] - dd["chg3"], 1) > 0.25:
+        risk.append(f"**Receivable Days Stretching:** {dd['latest']:.0f} days (up {dd['chg3']:.0f} over 3 yrs).")
+    if cash.get("regime") == "GROWTH_CAPEX":
+        risk.append(f"**Debt-Funded Growth Capex:** negative FCF is financed by borrowing (net debt/EBITDA {_fmt(cash.get('nd_ebitda'), 'x')}); "
+                    "track commissioning, regulated returns and refinancing costs.")
+    elif cash.get("regime") == "CASH_BURN":
+        risk.append("**Genuine Cash Burn:** operating cash flow / interest cover are weak.")
+    if street.get("has_data") and street.get("mean") is not None and street.get("n") and street["n"] >= 4:
+        if street["mean"] <= 2.2 and (street.get("upside_pct") or 0) >= 15:
+            pos.append(f"**Street Conviction:** {street['label']} from {street['n']} analysts, mean target {_fmt(street['upside_pct'], '%')} above CMP (external opinion).")
+        elif street["mean"] >= 3.5:
+            risk.append(f"**Street is Cautious:** consensus {street['label']} from {street['n']} analysts.")
+    return pos, risk
+
+
+def build_snapshot_extras(metrics: Dict[str, Any], extras: Dict[str, Any], street: Dict[str, Any]) -> Dict[str, Any]:
+    pio = extras.get("piotroski")
+    rh = extras.get("roce_hist")
+    ey = extras.get("earnings_yield")
+    return {
+        "Cash-Flow Regime": metrics["cash"]["regime"],
+        "Street Consensus": street["label"] if street["has_data"] else "N/A",
+        "Street Target Upside (%)": round(street["upside_pct"], 1) if street.get("upside_pct") is not None else None,
+        "Piotroski F-Score": f"{pio['score']}/{pio['evaluable']}" if pio else None,
+        "Promoter Pledge (%)": extras.get("pledge"),
+        "Earnings Yield (%)": round(ey, 2) if ey is not None else None,
+        "EBIT Yield (%)": round(extras["ebit_yield"], 2) if extras.get("ebit_yield") is not None else None,
+        "ROCE 5Y Avg (%)": round(rh["avg5"], 2) if rh else (metrics.get("roce_pct")),
+    }
+
+
+# ------------------------------------------------------------------------------
+# D. UI RENDERERS
+# ------------------------------------------------------------------------------
+def render_business_panel(bundle: Dict[str, Any]) -> None:
+    info, scr = bundle["info"], bundle.get("screener", {})
+    summary = info.get("longBusinessSummary")
+    about, key_pts = scr.get("about"), scr.get("key_points")
+    st.header("What does this company actually sell?")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Sector", info.get("sector") or "N/A")
+    c2.metric("Industry", info.get("industry") or "N/A")
+    emp = info.get("fullTimeEmployees")
+    c3.metric("Employees", f"{int(emp):,}" if emp else "N/A")
+    if summary:
+        st.markdown(f"**Business summary (Yahoo Finance):** {summary}")
+    if about:
+        st.markdown(f"**About (Screener.in):** {about}")
+    if key_pts:
+        st.markdown(f"**Key points (Screener.in):** {key_pts}")
+    if not (summary or about or key_pts):
+        st.info("No business description was returned by the data feeds for this ticker.")
+    st.caption("Yahoo/Screener do not publish a segment-wise revenue split. For the exact profit mix, open the segment note in the latest "
+               "annual report / investor presentation" + (f" ({info.get('website')})." if info.get("website") else "."))
+
+
+def render_extended_sections(bundle: Dict[str, Any], metrics: Dict[str, Any], decision: Dict[str, Any],
+                             base_res: Dict[str, Any], street: Dict[str, Any], hold_info: Optional[str]) -> None:
+    cash, ex = metrics["cash"], metrics["extras"]
+    st.divider()
+    st.header("6. Cash-Flow Reality Check (Fail-Safe)")
+    st.markdown(
+        f"<div style='border-left:6px solid {cash['color']};padding:10px 14px;background:rgba(127,127,127,0.08);border-radius:6px;'>"
+        f"<b style='color:{cash['color']}'>{cash['label']}</b><br>{cash['message']}</div>", unsafe_allow_html=True)
+    if cash["checks"]:
+        chk = pd.DataFrame(cash["checks"])
+        chk["Result"] = chk["Pass"].map({True: "PASS", False: "FAIL", None: "N/A"})
+        st.dataframe(chk[["Check", "Actual", "Result"]], hide_index=True, use_container_width=True)
+    if cash.get("owner_earnings") is not None:
+        st.caption(f"Owner earnings (CFO - maintenance capex ~ depreciation): {format_inr_crores(cash['owner_earnings'])}  |  "
+                   f"Reported FCF: {format_inr_crores(cash.get('fcf'))}  |  Capex: {format_inr_crores(cash.get('capex'))}")
+
+    st.header("7. Quality & Earnings-Integrity Scorecard")
+    q1, q2, q3, q4 = st.columns(4)
+    pio, alt, ac, rh = ex.get("piotroski"), ex.get("altman"), ex.get("accrual"), ex.get("roce_hist")
+    q1.metric("Piotroski F-Score", f"{pio['score']}/{pio['evaluable']}" if pio else "N/A")
+    q2.metric("Altman Z'' (EM)", f"{alt['z']:.1f} - {alt['zone']}" if alt else "N/A")
+    q3.metric("Cum. CFO / Net Profit", _fmt(ac["cum_cfo_ni"] * 100, "%", 0) if (ac and ac.get("cum_cfo_ni") is not None) else "N/A")
+    q4.metric("Interest Cover", _fmt(ex.get("icr_used"), "x"))
+    w1, w2, w3, w4 = st.columns(4)
+    w1.metric("ROCE 5Y Avg", _fmt(rh["avg5"], "%") if rh else "N/A", f"latest {_fmt(rh['latest'], '%')}" if rh else None)
+    w2.metric("Debtor Days", _fmt(ex["debtor_days"]["latest"], "", 0) if ex.get("debtor_days") else "N/A",
+              f"{ex['debtor_days']['chg3']:+.0f} vs 3y ago" if (ex.get("debtor_days") and ex["debtor_days"].get("chg3") is not None) else None,
+              delta_color="inverse")
+    w3.metric("Earnings Yield vs G-Sec", _fmt(ex.get("earnings_yield"), "%"),
+              f"{ex['ey_spread']:+.1f} pp vs {ex['rf']:.1f}%" if ex.get("ey_spread") is not None else None)
+    w4.metric("EBIT Yield (Greenblatt)", _fmt(ex.get("ebit_yield"), "%"))
+    d1, d2 = st.columns(2)
+    d1.metric("Dividend Yield", _fmt(ex.get("div_yield"), "%", 2))
+    d2.metric("Dividend Payout", _fmt(ex.get("payout"), "%", 0))
+    if pio:
+        with st.expander("Piotroski test breakdown"):
+            st.dataframe(pd.DataFrame({"Test": list(pio["tests"].keys()),
+                                       "Result": ["PASS" if v else "FAIL" if v is False else "N/A" for v in pio["tests"].values()]}),
+                         hide_index=True, use_container_width=True)
+    st.caption("Altman Z'' uses the emerging-market, non-financial formula (Safe > 5.85, Grey 4.35-5.85, Distress < 4.35). "
+               "Beneish M-score is not used because Yahoo rarely returns the line items it needs for Indian companies; "
+               "multi-year CFO/profit and Sloan accruals test the same earnings-manipulation risk.")
+
+    st.header("8. Conviction Dashboard (Insiders, Institutions & the Street)")
+    lenses = build_conviction_lenses(decision, base_res, street, ex, cash)
+    npos, nneg = int((lenses["Signal"] == "Positive").sum()), int((lenses["Signal"] == "Negative").sum())
+    st.markdown(f"**Lens alignment:** {npos} positive, {nneg} negative, {len(lenses) - npos - nneg} neutral across {len(lenses)} independent lenses.")
+    st.dataframe(lenses, hide_index=True, use_container_width=True)
+    o1, o2, o3, o4 = st.columns(4)
+    pr, fi, di = ex.get("promoter"), ex.get("fii"), ex.get("dii")
+    o1.metric("Promoter Holding", _fmt(pr["latest"], "%") if pr else "N/A", f"{pr['chg_1y']:+.1f} pp 1Y" if (pr and pr.get("chg_1y") is not None) else None)
+    o2.metric("Promoter Pledge", _fmt(ex.get("pledge"), "%"))
+    o3.metric("FII Holding", _fmt(fi["latest"], "%") if fi else "N/A", f"{fi['chg_1y']:+.1f} pp 1Y" if (fi and fi.get("chg_1y") is not None) else None)
+    o4.metric("DII Holding", _fmt(di["latest"], "%") if di else "N/A", f"{di['chg_1y']:+.1f} pp 1Y" if (di and di.get("chg_1y") is not None) else None)
+    st.subheader("Sell-side analyst view (external opinion - not part of the score)")
+    if street["has_data"]:
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Consensus", street["label"], f"{street['n']} analysts" if street["n"] else None, delta_color="off")
+        s2.metric("Mean Target", format_inr_price(street["tm"]) if street["tm"] else "N/A",
+                  f"{street['upside_pct']:+.1f}% vs CMP" if street["upside_pct"] is not None else None)
+        s3.metric("Target Range", f"{format_inr_price(street['tl'])} - {format_inr_price(street['th'])}" if (street["tl"] and street["th"]) else "N/A")
+        iv = base_res.get("blended_intrinsic")
+        s4.metric("Your Blended IV", format_inr_price(iv) if iv else "N/A")
+        st.caption(f"Coverage: {street['coverage']}.")
+        if street["counts"]:
+            st.markdown("**Rating split:** " + " | ".join(f"{k}: {v}" for k, v in street["counts"].items()))
+        if street["actions"] is not None and not street["actions"].empty:
+            st.markdown("**Recent rating actions by named brokerages:**")
+            st.dataframe(street["actions"], hide_index=True, use_container_width=True)
+        st.caption("Sell-side ratings skew positive, targets are 12-month views, and thin coverage (small caps) is unreliable. "
+                   "Use them as a cross-check against your own valuation, never as a substitute for it.")
+    else:
+        st.info("No analyst coverage data was returned for this ticker.")
+    if hold_info:
+        st.info(hold_info)
+
+
+# ------------------------------------------------------------------------------
+# E. PORTFOLIO TAB (cost basis, weights, tax-aware sell hurdle)
+# ------------------------------------------------------------------------------
+def _norm_ticker(t: str) -> str:
+    t = (t or "").strip().upper()
+    return t if (not t or "." in t) else f"{t}.NS"
+
+
+def load_portfolio() -> List[Dict[str, Any]]:
+    if "portfolio_rows" not in st.session_state:
+        rows: List[Dict[str, Any]] = []
+        if os.path.exists(PORTFOLIO_FILE):
+            try:
+                with open(PORTFOLIO_FILE, "r", encoding="utf-8") as fh:
+                    rows = json.load(fh)
+            except (OSError, ValueError):
+                rows = []
+        st.session_state["portfolio_rows"] = rows
+    return st.session_state["portfolio_rows"]
+
+
+def save_portfolio(rows: List[Dict[str, Any]]) -> None:
+    st.session_state["portfolio_rows"] = rows
+    try:
+        with open(PORTFOLIO_FILE, "w", encoding="utf-8") as fh:
+            json.dump(rows, fh, indent=2)
+    except OSError:
+        st.warning("Could not write portfolio file to disk (read-only host?). Data is kept for this session only.")
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_latest_prices(tickers: Tuple[str, ...]) -> Dict[str, Optional[float]]:
+    out: Dict[str, Optional[float]] = {}
+    for t in tickers:
+        px = None
+        try:
+            px = _f(yf.Ticker(t).fast_info.get("last_price"))
+            if px is None:
+                h = yf.Ticker(t).history(period="5d")
+                px = _f(h["Close"].dropna().iloc[-1]) if not h.empty else None
+        except Exception:
+            px = None
+        out[t] = px
+    return out
+
+
+def estimate_sale_tax(qty: float, avg_price: float, buy_date: Any, cmp: float) -> Dict[str, Any]:
+    value, gain = qty * cmp, (cmp - avg_price) * qty
+    try:
+        days = (date.today() - pd.to_datetime(buy_date).date()).days
+    except Exception:
+        days = None
+    long_term = days is not None and days > 365
+    if gain <= 0:
+        tax, kind = 0.0, "Loss (can offset gains)"
+    elif long_term:
+        tax, kind = max(0.0, gain - LTCG_EXEMPTION_INR) * LTCG_RATE * (1 + TAX_CESS), "LTCG 12.5%"
+    else:
+        tax, kind = gain * STCG_RATE * (1 + TAX_CESS), ("STCG 20%" if days is not None else "STCG 20% (buy date unknown)")
+    return {"value": value, "gain": gain, "tax": tax, "kind": kind, "days": days}
+
+
+def find_holding(ticker: str) -> Optional[Dict[str, Any]]:
+    for r in load_portfolio():
+        if _norm_ticker(str(r.get("Ticker", ""))) == _norm_ticker(ticker):
+            q, a = _f(r.get("Quantity")), _f(r.get("Avg Buy Price (₹)"))
+            if q and a:
+                return {"qty": q, "avg": a, "buy_date": r.get("Buy Date")}
+    return None
+
+
+def render_portfolio_tab(max_cap_pct: float) -> None:
+    st.subheader("My Portfolio & Position Sizing")
+    st.caption("Enter your real holdings. The analyzer then uses your cost basis to compute the tax-aware 'rotate capital' hurdle.")
+    cols = ["Ticker", "Quantity", "Avg Buy Price (₹)", "Buy Date"]
+    df = pd.DataFrame(load_portfolio(), columns=cols)
+    df["Buy Date"] = pd.to_datetime(df["Buy Date"], errors="coerce").dt.date
+    edited = st.data_editor(
+        df, num_rows="dynamic", use_container_width=True, key="portfolio_editor",
+        column_config={"Ticker": st.column_config.TextColumn(help="NSE symbol, e.g. ADANIENSOL or ADANIENSOL.NS"),
+                       "Quantity": st.column_config.NumberColumn(min_value=0.0, step=1.0),
+                       "Avg Buy Price (₹)": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
+                       "Buy Date": st.column_config.DateColumn()},
+    )
+    if st.button("Save Holdings", type="primary"):
+        rows = []
+        for r in edited.to_dict("records"):
+            if r.get("Ticker") and _f(r.get("Quantity")) and _f(r.get("Avg Buy Price (₹)")):
+                bd = r.get("Buy Date")
+                rows.append({"Ticker": _norm_ticker(str(r["Ticker"])), "Quantity": float(r["Quantity"]),
+                             "Avg Buy Price (₹)": float(r["Avg Buy Price (₹)"]),
+                             "Buy Date": (str(bd) if bd is not None and not pd.isna(bd) else None)})
+        save_portfolio(rows)
+        st.success(f"Saved {len(rows)} holding(s).")
+    rows = load_portfolio()
+    if not rows:
+        st.info("No holdings saved yet.")
+        return
+    prices = get_latest_prices(tuple(sorted({_norm_ticker(r["Ticker"]) for r in rows})))
+    recs, total = [], 0.0
+    for r in rows:
+        t = _norm_ticker(r["Ticker"])
+        px = prices.get(t)
+        if px is None:
+            recs.append({"Ticker": t, "Value (₹)": None})
+            continue
+        tx = estimate_sale_tax(r["Quantity"], r["Avg Buy Price (₹)"], r.get("Buy Date"), px)
+        total += tx["value"]
+        recs.append({"Ticker": t, "CMP (₹)": round(px, 2), "Value (₹)": round(tx["value"]), "Unrealised P&L (₹)": round(tx["gain"]),
+                     "P&L (%)": round((px / r["Avg Buy Price (₹)"] - 1) * 100, 1), "Held (days)": tx["days"],
+                     "Tax if sold (₹)": round(tx["tax"]), "Tax basis": tx["kind"]})
+    out = pd.DataFrame(recs)
+    if total > 0 and "Value (₹)" in out.columns:
+        out["Weight (%)"] = (out["Value (₹)"] / total * 100).round(1)
+        out["Over cap?"] = out["Weight (%)"].apply(lambda w: "YES" if (pd.notna(w) and w > max_cap_pct) else "")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Portfolio Value", f"₹{total:,.0f}")
+    m2.metric("Total Unrealised P&L", f"₹{out['Unrealised P&L (₹)'].sum():,.0f}" if "Unrealised P&L (₹)" in out.columns else "N/A")
+    m3.metric("Largest Position", f"{out['Weight (%)'].max():.1f}%" if "Weight (%)" in out.columns else "N/A")
+    st.dataframe(out, hide_index=True, use_container_width=True)
+    st.caption("Tax estimate: LTCG 12.5% above the Rs 1.25 lakh yearly exemption (applied per position here, but it is shared across all your sales), "
+               "STCG 20% within 12 months, plus 4% cess; surcharge and loss set-offs are not modelled. Prices are delayed.")
+
+
+
+# ==============================================================================
 # 10. STREAMLIT APP RUNNER (2-TAB ARCHITECTURE)
 # ==============================================================================
 def main() -> None:
@@ -2654,6 +3343,12 @@ def main() -> None:
             min_value=2.0, max_value=6.0, value=4.0, step=0.25,
             disabled=not use_custom_params,
         )
+        st.session_state["rf_rate"] = st.number_input(
+            "10-Year G-Sec Yield (%) - risk-free rate", min_value=4.0, max_value=10.0, value=6.8, step=0.05,
+            help="Used in CAPM discount rate and the earnings-yield-vs-bond comparison. Update to the current 10Y yield.")
+        st.session_state["failsafe_on"] = st.checkbox(
+            "Capex fail-safe (protect growth-phase stocks with negative FCF)", value=True,
+            help="When ON, negative FCF caused by growth capex (with real operating cash flow and covered interest) will not trigger an automatic exit.")
         st.markdown("---")
         st.subheader("Exit Strategy & Sizing Rules")
         current_weight_input = st.slider(
@@ -2696,9 +3391,10 @@ def main() -> None:
     # --------------------------------------------------------------------------
     # TWO-TAB ARCHITECTURE: TAB 1 (VALUATION DASHBOARD) & TAB 2 (SAVED LIST)
     # --------------------------------------------------------------------------
-    tab_analyzer, tab_saved = st.tabs([
+    tab_analyzer, tab_saved, tab_portfolio = st.tabs([
         "Live Institutional Valuation Engine",
         f"Comparison Watchlist & History ({len(st.session_state.saved_analyses)})",
+        "My Portfolio",
     ])
 
     with tab_analyzer:
@@ -2712,6 +3408,9 @@ def main() -> None:
             try:
                 bundle = fetch_company_bundle(target_ticker)
                 metrics = extract_comprehensive_metrics(bundle)
+                metrics["cash"] = assess_cash_flow_regime(bundle, metrics)
+                metrics["extras"] = compute_value_extras(bundle, metrics)
+                street = build_street_view(bundle)
                 qtr_analysis = extract_quarterly_trend_analysis(bundle)
                 checklist_result = evaluate_sector_checklist(bundle, metrics)
                 df_peers, peer_medians = fetch_industry_peer_benchmarks(
@@ -2735,11 +3434,15 @@ def main() -> None:
                 st.error(f"**Ticker Lookup Error:** {ve}")
                 with tab_saved:
                     render_saved_tab()
+                with tab_portfolio:
+                    render_portfolio_tab(max_cap_input)
                 st.stop()
             except Exception as exc:
                 st.error(f"**Data Connectivity Issue:** `{exc}`. Tap 'Clear Cache & Force Fresh Fetch' in sidebar.")
                 with tab_saved:
                     render_saved_tab()
+                with tab_portfolio:
+                    render_portfolio_tab(max_cap_input)
                 st.stop()
 
         info = bundle["info"]
@@ -2787,6 +3490,9 @@ def main() -> None:
             except Exception as e:
                 st.warning(f"Could not parse uploaded CSV: {e}")
 
+        st.divider()
+
+        render_business_panel(bundle)
         st.divider()
 
         # SECTION 1: KPIS & TRENDS
@@ -3112,6 +3818,15 @@ def main() -> None:
         )
         valuation_anchor_price = buy_zones["valuation_anchor"]
 
+        _hold = find_holding(target_ticker)
+        irr_hurdle, hold_info = 8.0, None
+        if _hold:
+            _tx = estimate_sale_tax(_hold["qty"], _hold["avg"], _hold["buy_date"], current_price)
+            if _tx["value"] > 0:
+                irr_hurdle = round(max(4.0, (_tx["tax"] / _tx["value"] * 100.0) / 4.0 + 3.5), 1)
+            hold_info = (f"Your position: {_hold['qty']:,.0f} shares @ avg ₹{_hold['avg']:,.2f} | unrealised P&L ₹{_tx['gain']:,.0f} | "
+                         f"est. tax if sold ₹{_tx['tax']:,.0f} ({_tx['kind']}) -> rotation hurdle set to +{irr_hurdle:.1f}%/yr "
+                         "(tax drag amortised over ~4 years + 3.5 pp risk premium).")
         # 3. NOW RUN THE EXIT PLAYBOOK (USING IMPLIED_G1_PCT)
         exit_plan = evaluate_exit_and_trim_strategy(
             cmp=current_price,
@@ -3131,6 +3846,11 @@ def main() -> None:
             current_portfolio_weight_pct=current_weight_input,
             max_single_stock_cap_pct=max_cap_input,
             replacement_irr_pct=alt_irr_input,
+            cash_regime=metrics["cash"]["regime"],
+            leverage_mode="capital_intensive" if profile["archetype"] == "ENERGY_UTILITIES" else "standard",
+            icr=metrics["cash"]["icr_used"],
+            nd_ebitda=metrics["cash"]["nd_ebitda"],
+            irr_hurdle_pct=irr_hurdle,
         )
 
         st.markdown("#### Automated Exit Strategy & Position Management Playbook (For Existing Holders)")
@@ -3148,7 +3868,7 @@ def main() -> None:
                 </h4>
                 <span style="color: #94a3b8; font-size: 0.90rem;">
                     - <b>Est. Holding 5-Yr IRR:</b> <code>{exit_plan['est_holding_irr']:.1f}%/yr</code> &nbsp;|&nbsp;
-                    - <b>Alternative Idea Spread:</b> <code>{exit_plan['irr_spread']:+.1f}%/yr</code> (Hurdle >= +8.0% for 12.5% LTCG) &nbsp;|&nbsp;
+                    - <b>Alternative Idea Spread:</b> <code>{exit_plan['irr_spread']:+.1f}%/yr</code> (Hurdle >= +{irr_hurdle:.1f}%, tax-aware) &nbsp;|&nbsp;
                     - <b>Your Allocation:</b> <code>{current_weight_input:.1f}%</code> (Cap: {max_cap_input:.1f}%)
                 </span>
             </div>
@@ -3242,6 +3962,10 @@ def main() -> None:
                 f"₹{buy_zones['deep_value_zone'][0]:,.1f} - ₹{buy_zones['deep_value_zone'][1]:,.1f}",
                 "Tranche 3 (Max Safety)",
             )
+        _pos_x, _risk_x = build_extra_points(metrics["extras"], metrics["cash"], street)
+        decision["positive_points"].extend(_pos_x)
+        decision["risk_points"].extend(_risk_x)
+        render_extended_sections(bundle, metrics, decision, base_res, street, hold_info)
         # SAVE SNAPSHOT ACTION SECTION
         st.divider()
         st.markdown("#### Save / Update Analysis to Comparison Ledger")
@@ -3261,6 +3985,8 @@ def main() -> None:
                     "Ticker": target_ticker,
                     "Company": company_name,
                     "Moat Grade": decision["moat_grade"],
+                    "Industry": info.get("industry"),
+                    **build_snapshot_extras(metrics, metrics["extras"], street),
                     "Valuation Grade": decision["val_grade"],
                     "CMP (₹)": round(current_price, 2),
                     "Implied Growth Rate (g₁ %)": round(implied_g1_pct, 2),
@@ -3301,6 +4027,8 @@ def main() -> None:
     # --------------------------------------------------------------------------
     with tab_saved:
         render_saved_tab()
+    with tab_portfolio:
+        render_portfolio_tab(max_cap_input)
 
 
 if __name__ == "__main__":
