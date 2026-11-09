@@ -1,7 +1,9 @@
-streamlit
-yfinance
+streamlit>=1.40
 pandas
 numpy
-nltk
 requests
+yfinance
+nltk
 beautifulsoup4
+feedparser
+anthropic
