@@ -551,6 +551,77 @@ def classify_industry_profile(sector: str, industry: str, ticker: str = "") -> D
 # ==============================================================================
 # 4. MULTI-SOURCE DATA FETCHER (SCREENER.IN + YFINANCE)
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# DATA-INTEGRITY GUARDS (stale / wrong-entity Screener pages, conflicting P/E feeds)
+# ------------------------------------------------------------------------------
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+PE_PRIORITY = ["Screener.in P/E", "Price / Screener TTM EPS", "Price / Screener 4-quarter EPS",
+               "Yahoo trailing P/E", "Price / Yahoo trailing EPS", "Price / latest annual EPS (statements)"]
+
+
+def _latest_period_from_section(sec: Any) -> Optional[datetime]:
+    """Newest 'Mon YYYY' column header in a Screener table (TTM column ignored)."""
+    if sec is None:
+        return None
+    best = None
+    for th in sec.find_all("th"):
+        m = re.match(r"^\s*([A-Za-z]{3})\w*\s+(\d{4})\s*$", th.get_text(strip=True))
+        if m and m.group(1).lower() in _MONTHS:
+            d = datetime(int(m.group(2)), _MONTHS[m.group(1).lower()], 1)
+            best = d if (best is None or d > best) else best
+    return best
+
+
+def screener_page_is_fresh(cand_soup: Any, today: Optional[datetime] = None) -> Tuple[bool, str]:
+    """Rejects stale pages (e.g. Screener's ghost 'consolidated' view with only Dec-2005/2006 columns)."""
+    today = today or datetime.now()
+    q = _latest_period_from_section(cand_soup.find("section", id="quarters"))
+    p = _latest_period_from_section(cand_soup.find("section", id="profit-loss"))
+    q_ok = q is not None and (today - q).days <= 300     # newest quarter within ~10 months
+    p_ok = p is not None and (today - p).days <= 640     # newest fiscal year within ~21 months
+    why = f"newest quarter {q.strftime('%b %Y') if q else 'none'}, newest fiscal year {p.strftime('%b %Y') if p else 'none'}"
+    return (q_ok or p_ok), why
+
+
+def sanitize_screener(scr: Dict[str, Any], info: Dict[str, Any], price: Optional[float]) -> Dict[str, Any]:
+    """Discards a Screener payload that does not describe the same company/price as Yahoo."""
+    if not scr or not scr.get("available"):
+        return scr
+    r, problems = scr.get("ratios", {}), []
+    sp = r.get("current_price")
+    if sp and price and price > 0 and max(sp, price) / min(sp, price) > 1.15:
+        problems.append(f"price mismatch (Screener Rs {sp:,.0f} vs Yahoo Rs {price:,.0f})")
+    bv, ybv = r.get("book_value"), safe_float(info.get("bookValue"))
+    if bv and ybv and bv > 0 and ybv > 0 and max(bv, ybv) / min(bv, ybv) > 3.0:
+        problems.append(f"book value mismatch (Screener Rs {bv:,.1f} vs Yahoo Rs {ybv:,.1f})")
+    if not problems:
+        return scr
+    out = dict(scr)
+    out.update(available=False, ratios={}, quarters_df=pd.DataFrame(), pnl_df=pd.DataFrame(), cf_df=pd.DataFrame(),
+               bs_df=pd.DataFrame(), ratios_df=pd.DataFrame(), shp_df=pd.DataFrame(), about=None, key_points=None)
+    out["rejected"] = list(scr.get("rejected", [])) + ["Screener data discarded - " + "; ".join(problems)]
+    return out
+
+
+def consensus_pe(sources: Dict[str, float], tol: float = 0.30) -> Tuple[Optional[float], bool, List[str]]:
+    """Picks the P/E that most sources agree on (within tol); ties go to the more trusted source. Outliers are reported."""
+    items = [(k, v) for k, v in sources.items() if v and v > 0]
+    if not items:
+        return None, False, []
+    agree = lambda a, b: max(a, b) / min(a, b) <= 1.0 + tol
+    best = None
+    for k, v in items:
+        cluster = [(k2, v2) for k2, v2 in items if agree(v, v2)]
+        prio = -(PE_PRIORITY.index(k) if k in PE_PRIORITY else 99)
+        if best is None or (len(cluster), prio) > best[0]:
+            best = ((len(cluster), prio), cluster)
+    cluster = best[1]
+    keep = {k for k, _ in cluster}
+    rejected = [k for k, _ in items if k not in keep]
+    return float(np.median([v for _, v in cluster])), bool(rejected), rejected
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
     base_sym = clean_symbol.split(".")[0].strip().upper()
@@ -572,6 +643,8 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
         "shp_df": pd.DataFrame(),
         "about": None,
         "key_points": None,
+        "variant": None,
+        "rejected": [],
     }
 
     urls = [
@@ -588,8 +661,12 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
                 pnl_sec = cand_soup.find("section", id="profit-loss")
                 qtr_sec = cand_soup.find("section", id="quarters")
                 if (pnl_sec and len(pnl_sec.find_all("tr")) >= 3) or (qtr_sec and len(qtr_sec.find_all("tr")) >= 3):
-                    soup = cand_soup
-                    break
+                    fresh, why = screener_page_is_fresh(cand_soup)
+                    variant = "consolidated" if "/consolidated" in url else "standalone"
+                    if fresh:
+                        soup, result["variant"] = cand_soup, variant
+                        break
+                    result["rejected"].append(f"Screener {variant} page ignored: stale data ({why})")
         except Exception:
             continue
 
@@ -619,6 +696,8 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
                     ratios["roe_pct"] = r_val
                 elif "dividend yield" in r_name and r_val is not None:
                     ratios["div_yield_pct"] = r_val
+
+    _aux: Dict[str, Any] = {}
 
     def parse_screener_table(section_id: str) -> pd.DataFrame:
         sec = soup.find("section", id=section_id)
@@ -658,12 +737,20 @@ def fetch_screener_india_data(clean_symbol: str) -> Dict[str, Any]:
 
         df_out = pd.DataFrame.from_dict(rows_dict, orient="index", columns=cols_clean)
         if section_id == "profit-loss":
+            _ttm_cols = [c for c in df_out.columns if str(c).upper().startswith("TTM")]
+            if _ttm_cols:
+                for _lab in df_out.index:
+                    if str(_lab).lower().startswith("eps"):
+                        _aux["ttm_eps"] = safe_float(df_out.loc[_lab, _ttm_cols[0]])
+                        break
             # drop the partial-year TTM column so annual growth compares full fiscal years
             df_out = df_out.drop(columns=[c for c in df_out.columns if str(c).upper().startswith("TTM")], errors="ignore")
         return df_out
 
     quarters_df = parse_screener_table("quarters")
     pnl_df = parse_screener_table("profit-loss")
+    if _aux.get("ttm_eps"):
+        ratios["ttm_eps"] = _aux["ttm_eps"]
     bs_df = parse_screener_table("balance-sheet")
     cf_df = parse_screener_table("cash-flow")
     ratios_df = parse_screener_table("ratios")
@@ -750,6 +837,8 @@ def fetch_company_bundle(ticker_symbol: str) -> Dict[str, Any]:
 
     if current_price is None:
         raise ValueError(f"Could not retrieve live market pricing for '{ticker_clean}'.")
+
+    screener_data = sanitize_screener(screener_data, info, current_price)
 
     yearly_close_map: Dict[int, float] = {}
     if hist_5y is not None and not hist_5y.empty and "Close" in hist_5y.columns:
@@ -1217,18 +1306,17 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
     pe_sources: Dict[str, float] = {}
     if scr_ratios.get("pe") and scr_ratios["pe"] > 0:
         pe_sources["Screener.in P/E"] = float(scr_ratios["pe"])
+    if scr_ratios.get("ttm_eps") and scr_ratios["ttm_eps"] > 0:
+        pe_sources["Price / Screener TTM EPS"] = _px / scr_ratios["ttm_eps"]
     if ttm_eps_scr and ttm_eps_scr > 0:
         pe_sources["Price / Screener 4-quarter EPS"] = _px / ttm_eps_scr
     if _y_pe and _y_pe > 0:
         pe_sources["Yahoo trailing P/E"] = _y_pe
     if _y_eps and _y_eps > 0:
         pe_sources["Price / Yahoo trailing EPS"] = _px / _y_eps
-
-    _scr_vals = [v for k, v in pe_sources.items() if "Screener" in k]
-    _yah_vals = [v for k, v in pe_sources.items() if "Yahoo" in k]
-    pe_ratio = (_scr_vals[0] if _scr_vals else (_yah_vals[0] if _yah_vals else None))   # Screener-first
-    _all = list(pe_sources.values())
-    pe_disagree = len(_all) >= 2 and (max(_all) / min(_all) > 1.35)
+    if latest_stmt_eps and latest_stmt_eps > 0:
+        pe_sources["Price / latest annual EPS (statements)"] = _px / latest_stmt_eps
+    pe_ratio, pe_disagree, pe_rejected = consensus_pe(pe_sources)
     if pe_ratio is None:
         pe_ratio = safe_float(info.get("forwardPE"))
     if pe_ratio is None and latest_stmt_eps and latest_stmt_eps > 0:
@@ -1410,6 +1498,7 @@ def extract_comprehensive_metrics(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "buyback_explanation": buyback_explanation,
         "pe_sources": pe_sources,
         "pe_disagree": pe_disagree,
+        "pe_rejected": pe_rejected,
         "assumed_fields": sorted(set(assumed)),
     }
 
@@ -3459,9 +3548,11 @@ def main() -> None:
             f"**Industry Profile:** {profile['profile_name']} | **Sector:** {bundle['sector']} ({bundle['industry']}) | "
             f"**Current Price:** {format_inr_price(current_price)} | "
             f"**Market Cap:** {format_inr_crores(mcap)} | "
-            f"**Data Feed:** `Yahoo Finance` + `{'Screener.in Consolidated' if scr_ok else 'NSE Median Fallback'}`"
+            f"**Data Feed:** `Yahoo Finance` + `{('Screener.in ' + str(bundle['screener'].get('variant') or 'data').title()) if scr_ok else 'NSE Median Fallback'}`"
         )
         st.info(f"**Sector Routing:** {profile['applicable_note']}")
+        for _rej in bundle.get("screener", {}).get("rejected", []):
+            st.warning(f"**Data-integrity guard:** {_rej}. The app used the other Screener page or Yahoo data instead.")
         _assumed = sorted(set(metrics.get("assumed_fields", []) + dcf_inputs.get("assumed_fields", [])))
         if _assumed:
             st.warning(
@@ -3474,7 +3565,8 @@ def main() -> None:
                 st.warning(
                     "**P/E data feeds disagree** - "
                     + ", ".join(f"{k}: {v:.1f}x" for k, v in metrics["pe_sources"].items())
-                    + f". The app is using **{metrics['pe_ratio']:.1f}x** (Screener-first). "
+                    + f". The app is using **{metrics['pe_ratio']:.1f}x**, the value most independent sources agree on. "
+                    + "Outlier source(s) ignored: " + ", ".join(metrics.get("pe_rejected", [])) + ". "
                     "Verify against the latest results before relying on the verdict."
                 )
             with st.expander("P/E source reconciliation (diagnostics)", expanded=False):
