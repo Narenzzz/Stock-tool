@@ -3302,7 +3302,9 @@ def main() -> None:
     with st.sidebar:
         st.header("Indian Stock Selector")
 
-        preset_options = ["Custom NSE/BSE Ticker..."] + [f"{k} - {v}" for k, v in INDIAN_PRESETS.items()]
+        # Deep link from the News Screener app: https://<analyser>/?ticker=HAL
+        _qp = str(st.query_params.get("ticker", "")).strip().upper()
+        preset_options = ["Custom NSE/BSE Ticker..."] + ([f"{_qp} - From screener link"] if _qp else []) + [f"{k} - {v}" for k, v in INDIAN_PRESETS.items()]
         selected_preset = st.selectbox("Quick-Select Indian Stock", options=preset_options, index=1)
 
         if selected_preset != "Custom NSE/BSE Ticker...":
